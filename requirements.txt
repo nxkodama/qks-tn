@@ -1,0 +1,4 @@
+jupyterlab
+tensorflow
+tensorflow-addons
+tensornetwork
