@@ -44,3 +44,8 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
 - 22:00 **chi = 8 early signal is strong**: 2 epochs on 9,600 CIFAR images gives val acc 0.322 vs 0.167
   for chi = 4 under the identical setting (L4, patch encoder). The 64-outcome readout and the 64x64
   vertex unitaries both help; full 15-epoch sweeps launched.
+- 22:15 **Overlapping receptive fields: null result (item A, CIFAR).** 11x11/stride 3 (728 encoder
+  params, 7x the field) gives L1 0.3835 +/- 0.0024 and L4 0.4496 +/- 0.0023 -- slightly *worse* than the
+  non-overlapping 4x4/stride 4 default (0.3906 / 0.4552). Feedforward gain is unchanged (+6.6 +/- 0.5 pp).
+  So receptive-field size is not a lever either; the encoder really is saturated at chi = 4. Drops the
+  "overlapping patches" item from the expressivity list -- what is left is bond dimension and depth.
