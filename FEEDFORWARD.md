@@ -119,6 +119,32 @@ Longer/deeper follow-up (launched 2026-08-25): sweeps `ff-v2-L6` (128 episodes, 
 **63 epochs** (the fifth cycle boundary), with cycle checkpoints, to test whether the ff-v1 ordering holds
 with longer training and a deeper tree.
 
+## Other datasets: CIFAR-10 and ImageNet-32 (5-layer trees)
+
+`--task cifar10` (tf.keras) and `--task imagenet32` (HF `benjamin-paine/imagenet-1k-32x32`: ImageNet-1k
+centre-cropped + Lanczos-resampled to 32×32; 1,281,167 train / 50,000 val) are supported with
+`--nepisodes 64` (32 leaves, 5 layers). Inputs are the 3072 raw pixel values in [0, 1] (no deskewing);
+the kitchen-sink weight scale is `σ = 0.125·√(784/3072) ≈ 0.063` so the encoding angles have the same
+variance as on MNIST. CIFAR-10 keeps the paper's fixed 16→10 readout; ImageNet-32 (1000 classes) uses a
+trainable linear 16→1000 logits head (17k parameters, identical across configs). The training set is
+held in a CPU `tf.Variable` (uint8, 3.9 GB for ImageNet-32) and batches are gathered by shuffled index,
+which avoids TensorFlow's 2 GB graph-constant limit. `prepare_data` downloads/decodes each dataset
+once into the `qks-tn-data` Volume (ImageNet-32: 164 s).
+
+GPU choice (per-vertex B, 5 layers, 3072-dim inputs, batch 32; one ImageNet-32 job = 600k steps):
+
+| GPU | ms/step | wall/job | $/h | $/job |
+|---|---|---|---|---|
+| T4 | 22 | 3.7 h | 0.59 | 2.16 |
+| L4 | 24 | 4.0 h | 0.80 | 3.20 |
+| A10G | 20 | 3.3 h | 1.10 | 3.67 |
+| L40S | 17 | 2.8 h | 1.95 | 5.53 |
+| A100-40GB | 33 | 5.5 h | 2.10 | 11.6 |
+
+The step is launch-latency-bound (thousands of 16×16 complex kernels), so larger GPUs barely help;
+T4 is cheapest overall. Sweeps `cifar10-L5` and `imagenet32-L5` (C0, C1, C2, C4 × seed 0, 15 epochs)
+were launched 2026-08-25 on T4s.
+
 ## Not yet done
 
 - Finite-shot noise (`--shots 16/128/1024`, configs `C2s*`), `--ff-layers` ablations (root only /
