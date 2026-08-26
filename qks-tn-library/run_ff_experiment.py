@@ -10,6 +10,13 @@ Usage (local)::
         --seed 0 --out qks-tn-library/runs/binary_B_s0.json
 
 ``train(cfg, on_epoch=...)`` is importable (used by ``modal_ff_sweep.py``).
+
+Checkpointing: a ``tf.train.Checkpoint`` (weights, AdamW moments, optimizer step counter)
+is written to ``cfg['ckpt_dir']`` after every epoch together with the metric history.
+Re-running with a larger ``--epochs`` and ``--resume`` continues training from the last
+epoch with the learning-rate / weight-decay schedules exactly where they left off.
+Note the schedule's warm-restart cycles are 1, 2, 4, 8, 16, ... epochs, so cycle-aligned
+totals are 15, 31, 63 epochs.
 """
 
 from __future__ import annotations
@@ -44,6 +51,8 @@ DEFAULTS = dict(
     inter_threads=0,
     cache_dir=os.path.join(HERE, "data_cache"),
     out=None,
+    ckpt_dir=None,  # directory for per-epoch tf.train.Checkpoint (None = no checkpointing)
+    resume=False,  # resume from the latest checkpoint in ckpt_dir if one exists
     name=None,
     nepisodes=128,
     chi=4,
@@ -268,6 +277,29 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
     test_ds = tf.data.Dataset.from_tensor_slices((X_test, y_test)).batch(bs)
 
     history = []
+    initial_epoch = 0
+    manager = None
+    if cfg.get("ckpt_dir"):
+        ckpt_dir = cfg["ckpt_dir"]
+        os.makedirs(ckpt_dir, exist_ok=True)
+        # model weights + AdamW moments + the optimizer step counter (which drives the
+        # CosineDecayRestarts schedules), so training continues exactly where it stopped
+        ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
+        manager = tf.train.CheckpointManager(ckpt, ckpt_dir, max_to_keep=1)
+        hist_path = os.path.join(ckpt_dir, "history.json")
+        if cfg.get("resume") and manager.latest_checkpoint and os.path.exists(hist_path):
+            with open(hist_path) as f:
+                saved = json.load(f)
+            history = saved["epochs"]
+            initial_epoch = len(history)
+            ckpt.restore(manager.latest_checkpoint).expect_partial()
+            log(f"[{cfg['name']}] resumed from {manager.latest_checkpoint} at epoch {initial_epoch}")
+        elif cfg.get("resume"):
+            log(f"[{cfg['name']}] no checkpoint in {ckpt_dir}; starting fresh")
+        with open(os.path.join(ckpt_dir, "cfg.json"), "w") as f:
+            json.dump(cfg, f, indent=1)
+    if initial_epoch >= int(cfg["epochs"]):
+        log(f"[{cfg['name']}] already trained {initial_epoch} >= {cfg['epochs']} epochs; evaluating only")
 
     class EpochLogger(tf.keras.callbacks.Callback):
         def on_epoch_begin(self, epoch, logs=None):
@@ -299,6 +331,10 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
                 lr=lr_val,
             )
             history.append(rec)
+            if manager is not None:
+                manager.save(checkpoint_number=rec["epoch"])
+                with open(os.path.join(cfg["ckpt_dir"], "history.json"), "w") as f:
+                    json.dump(dict(cfg=cfg, params=counts, epochs=list(history)), f)
             log(
                 f"[{cfg['name']}] epoch {rec['epoch']}/{cfg['epochs']} "
                 f"loss {rec['loss']:.4f} acc {rec['acc']:.4f} "
@@ -308,13 +344,15 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
             if on_epoch is not None:
                 on_epoch(dict(cfg=cfg, params=counts, epochs=list(history)))
 
-    model.fit(
-        train_ds,
-        epochs=int(cfg["epochs"]),
-        validation_data=test_ds if cfg["eval_every_epoch"] else None,
-        verbose=0,
-        callbacks=[EpochLogger()],
-    )
+    if initial_epoch < int(cfg["epochs"]):
+        model.fit(
+            train_ds,
+            epochs=int(cfg["epochs"]),
+            initial_epoch=initial_epoch,
+            validation_data=test_ds if cfg["eval_every_epoch"] else None,
+            verbose=0,
+            callbacks=[EpochLogger()],
+        )
 
     test_loss, test_acc = model.evaluate(test_ds, verbose=0)
     probs = model.predict(test_ds, verbose=0)
@@ -336,6 +374,8 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
             max(((h["val_acc"], -h["val_loss"], h["epoch"]) for h in history if h["val_acc"] is not None), default=None)
         ),
         total_wall_s=time.time() - t_start,
+        resumed_from_epoch=initial_epoch,
+        checkpoint=(manager.latest_checkpoint if manager is not None else None),
         ms_per_step=float(np.median([h["ms_per_step"] for h in history[1:]] or [history[0]["ms_per_step"]])),
         test_predictions=preds,
         test_errors=test_errors,
@@ -382,6 +422,9 @@ def build_parser():
     ap.add_argument("--cache-dir", dest="cache_dir")
     ap.add_argument("--out")
     ap.add_argument("--name")
+    ap.add_argument("--ckpt-dir", dest="ckpt_dir", help="checkpoint directory (default runs/ckpt/<name>)")
+    ap.add_argument("--no-checkpoint", dest="no_checkpoint", action="store_true", help="disable checkpointing")
+    ap.add_argument("--resume", action="store_true", default=None, help="continue from the latest checkpoint in --ckpt-dir")
     return ap
 
 
@@ -392,10 +435,15 @@ def main(argv=None):
     overrides.update({k: v for k, v in args.items() if v is not None})
     if overrides.get("ff_null") == "none":
         overrides["ff_null"] = None
+    no_ckpt = overrides.pop("no_checkpoint", False)
     cfg = make_cfg(**overrides)
     cfg["config"] = config_name
     if cfg["out"] is None:
         cfg["out"] = os.path.join(HERE, "runs", cfg["name"] + ".json")
+    if no_ckpt:
+        cfg["ckpt_dir"] = None
+    elif cfg["ckpt_dir"] is None:
+        cfg["ckpt_dir"] = os.path.join(HERE, "runs", "ckpt", cfg["name"])
     train(cfg)
 
 

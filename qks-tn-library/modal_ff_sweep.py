@@ -13,6 +13,11 @@ Full multiclass sweep::
 
     python3 -m modal run qks-tn-library/modal_ff_sweep.py --configs C0,C1,C2,C3,C4,C5,F0,F2,F5 --seeds 0,1,2
 
+Continue the same jobs for more epochs (resumes from the per-epoch checkpoints on the Volume;
+pass ``--fresh`` to ignore them). Cycle-aligned totals for the cosine-restart schedule are 15, 31, 63::
+
+    python3 -m modal run qks-tn-library/modal_ff_sweep.py --configs C0,C2,C4 --seeds 0,1,2 --epochs 31 --sweep ff-v1
+
 GPU type: ``QKS_GPU=A10G python3 -m modal run ...`` (default ``T4``; ``QKS_GPU=none`` for CPU).
 Mid-run progress::
 
@@ -63,8 +68,13 @@ def train_job(cfg: dict, sweep: str) -> dict:
     cfg = dict(cfg)
     cfg["cache_dir"] = "/data"
     out_dir = f"/out/{sweep}/{cfg['name']}"
+    results_vol.reload()
     os.makedirs(out_dir, exist_ok=True)
     cfg["out"] = f"{out_dir}/result.json"
+    # per-epoch checkpoints live on the Volume next to the metrics, so re-running the same
+    # sweep with a larger --epochs resumes each job where it stopped
+    cfg["ckpt_dir"] = f"{out_dir}/ckpt"
+    cfg.setdefault("resume", True)
 
     # Deskewed-MNIST cache shared across jobs (first job computes, later ones reuse).
     data_vol.reload()
@@ -91,7 +101,9 @@ def main(
     task: str = "multiclass",
     sweep: str = "ff-v1",
     limit_train: int = 0,
+    fresh: bool = False,
 ):
+    """``fresh=True`` ignores existing checkpoints on the Volume and retrains from scratch."""
     sys.path.insert(0, HERE)
     import run_ff_experiment as rfe
 
@@ -104,6 +116,7 @@ def main(
                 ov["limit_train"] = int(limit_train)
             cfg = rfe.make_cfg(**ov)
             cfg["config"] = c
+            cfg["resume"] = not fresh
             cfgs.append(cfg)
     print(f"spawning {len(cfgs)} jobs on {GPU} (sweep={sweep}, task={task}, epochs={epochs})")
     handles = [train_job.spawn(cfg, sweep) for cfg in cfgs]
@@ -122,6 +135,8 @@ def main(
             continue
         (out_dir / f"{cfg['name']}.json").write_text(json.dumps(res))
         row.update(
+            epochs=len(res["epochs"]),
+            resumed_from_epoch=res.get("resumed_from_epoch", 0),
             final_test=res["final_test"],
             best_val=res["best_val"],
             params=res["params"],

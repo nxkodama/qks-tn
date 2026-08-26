@@ -87,6 +87,28 @@ Decision rule stated before the sweep (paired difference vs the parameter-matche
 every seed and > 2 s.e.m.): met by C4 vs C1, C5 vs C1, F2 vs F0, F5 vs F0; C2 vs C3 is positive on all
 seeds but its s.e.m. (0.36 pp) is inflated by the seed-2 tie, so it needs more seeds to clear the bar.
 
+## Checkpointing and training for more epochs
+
+Every run writes a `tf.train.Checkpoint` (model weights, AdamW moments and the optimizer step counter that
+drives the cosine-restart schedules) after each epoch, next to the metric history:
+
+- locally: `qks-tn-library/runs/ckpt/<run name>/` (disable with `--no-checkpoint`);
+- on Modal: `/out/<sweep>/<job>/ckpt/` on the `qks-tn-results` Volume.
+
+To continue a run, re-issue it with a larger `--epochs`; the Modal launcher resumes automatically
+(`--fresh` retrains from scratch), the local runner needs `--resume`:
+
+```bash
+python3 -m modal run qks-tn-library/modal_ff_sweep.py --configs C0,C2,C4 --seeds 0,1,2 --epochs 31 --sweep <sweep>
+.venv/bin/python qks-tn-library/run_ff_experiment.py --config C2 --task binary --epochs 31 --resume
+```
+
+The schedule is `CosineDecayRestarts(first_decay_steps = 1 epoch)` with period doubling, so the warm
+restarts fall at epochs 1, 3, 7, 15, 31, …; stop at a cycle boundary (15, 31, 63 epochs) — stopping
+mid-cycle leaves the learning rate high. Resumed training reproduces the schedule and the epoch-boundary
+state exactly; only the data-shuffle order differs from an uninterrupted run. The `ff-v1` sweep predates
+checkpointing, so extending it would retrain those jobs from scratch (31 epochs ≈ 15–30 min per job).
+
 ## Not yet done
 
 - Finite-shot noise (`--shots 16/128/1024`, configs `C2s*`), `--ff-layers` ablations (root only /
