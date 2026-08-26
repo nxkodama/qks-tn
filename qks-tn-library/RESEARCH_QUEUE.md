@@ -12,7 +12,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
 ## Queue
 
 - [x] **A. Collect `lenet-v2-*`** (CIFAR done; MNIST-overlap 3/6) — overlapping receptive fields (CIFAR 11×11/s3, MNIST 9×9/s3/p1) and
-  G=2 feature maps, configs L1/L4 × 3 seeds. Launched 21:34. Analyse vs `lenet-v1` (CIFAR L1 0.3906,
+  G=2 feature maps, configs L1/L4 × 3 seeds. Launched at the start of the night. Analyse vs `lenet-v1` (CIFAR L1 0.3906,
   L4 0.4552; MNIST L1 0.8809, L4 0.9759).
 - [x] **B. Collect `imagenet32-L5`** (done) — 4 jobs, 15 epochs, dense encoder, 1000-way linear head.
   At epoch 7: val acc 0.55–0.75 % (chance 0.1 %). Analyse when done; expect the 16-outcome readout to
@@ -22,9 +22,9 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   `--configs L4 --chi 8 --limit-train 9600 --epochs 2` (the step should become compute-bound, so the
   bigger GPUs may finally win on cost). Then 15-epoch sweeps `chi8-mnist`, `chi8-cifar` with
   configs L1,L4 (+ dense C0,C4 for the paper-model comparison), 3 seeds, on the cheapest GPU per step.
-  **Benchmarked 22:00:** L40S 37 ms/step ($0.47/job), A100-40GB 50 ($0.68), T4 135 ($0.52) — as predicted
+  **Benchmarked:** L40S 37 ms/step ($0.47/job), A100-40GB 50 ($0.68), T4 135 ($0.52) — as predicted
   the step is now compute-bound and the L40S wins on both speed and cost; use `--gpu L40S` for chi=8.
-  Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched 22:02 on L40S.
+  Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched on L40S.
 - [x] **D. χ = 8 on ImageNet-32** (baseline done at 7 epochs; per-vertex-B arm still running) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
   epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
 - [x] **E. Two-stage (implemented, run, negative result) "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
@@ -37,37 +37,41 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
 
 ## Findings log (append; newest last)
 
-- 21:45 χ = 8 implemented and tested (24/24 tests pass). χ = 4 remains bit-compatible: dense encoder
+*Entries are numbered in the order they were recorded. (Earlier drafts carried wall-clock stamps that
+were estimates rather than readings of the system clock; they have been replaced with ordinals. Verified
+times: the night's work began ~21:30 PDT 2026-08-25 and this correction was made at 23:47.)*
+
+- **[1]** χ = 8 implemented and tested (24/24 tests pass). χ = 4 remains bit-compatible: dense encoder
   matches the original `FeatureEncodingLayer` to 6e−8, and `fixed_readout_matrix(16,10)/(16,2)`
   reproduce `ConstMul`/`ConstMulBinary` exactly. χ = 8 dense encoder needs 192 episodes for 64 leaves;
   patch encoder uses 3 filters per register (147 params on CIFAR 4×4×3).
-- 22:00 **chi = 8 early signal is strong**: 2 epochs on 9,600 CIFAR images gives val acc 0.322 vs 0.167
+- **[2]** **chi = 8 early signal is strong**: 2 epochs on 9,600 CIFAR images gives val acc 0.322 vs 0.167
   for chi = 4 under the identical setting (L4, patch encoder). The 64-outcome readout and the 64x64
   vertex unitaries both help; full 15-epoch sweeps launched.
-- 22:15 **Overlapping receptive fields: null result (item A, CIFAR).** 11x11/stride 3 (728 encoder
+- **[3]** **Overlapping receptive fields: null result (item A, CIFAR).** 11x11/stride 3 (728 encoder
   params, 7x the field) gives L1 0.3835 +/- 0.0024 and L4 0.4496 +/- 0.0023 -- slightly *worse* than the
   non-overlapping 4x4/stride 4 default (0.3906 / 0.4552). Feedforward gain is unchanged (+6.6 +/- 0.5 pp).
   So receptive-field size is not a lever either; the encoder really is saturated at chi = 4. Drops the
   "overlapping patches" item from the expressivity list -- what is left is bond dimension and depth.
-- 22:40 **G = 2 feature maps IS a lever (CIFAR, item A).** Two chi=4 registers per position (128 leaves,
+- **[4]** **G = 2 feature maps IS a lever (CIFAR, item A).** Two chi=4 registers per position (128 leaves,
   7 layers, 196 encoder params): L1 0.4043 +/- 0.0015 and **L4 0.4737 +/- 0.0013** vs G=1's 0.3906 / 0.4552
   -- **+1.85 pp on the best model**, +++ on every seed, for ~1.25x the step cost (26 vs 21 ms/step).
   Contrast with the overlapping-patch null: what helps is *more registers*, not a bigger receptive field
   or more encoder parameters. Launched G = 4 (256 leaves, 8 layers) on CIFAR to see if it keeps going.
-- 22:40 **`ff-v2-L6` complete (63 epochs, depth 6, 3 seeds):** C0 0.9711 +/- 0.0014, C1 0.9720 +/- 0.0015,
+- **[5]** **`ff-v2-L6` complete (63 epochs, depth 6, 3 seeds):** C0 0.9711 +/- 0.0014, C1 0.9720 +/- 0.0015,
   C2 0.9809 +/- 0.0009, **C4 0.9859 +/- 0.0003**. Every ff-v1 ordering survives 4x longer training:
   C2-C0 = +0.98 +/- 0.21 pp, C4-C1 = +1.39 +/- 0.18 pp (both +++ , McNemar p <= 3e-6); per-vertex
   unitaries alone remain worthless (C1-C0 = +0.08 +/- 0.08 pp, n.s. on all three seeds).
-- 23:05 **MNIST overlapping patches (9x9/s3/p1): marginal.** L1 0.8952 +/- 0.0013, L4 0.9780 +/- 0.0009
+- **[6]** **MNIST overlapping patches (9x9/s3/p1): marginal.** L1 0.8952 +/- 0.0013, L4 0.9780 +/- 0.0009
   vs 7x7/s3's 0.8809 / 0.9759 -- a small (+0.2 pp on L4) gain, unlike the CIFAR case where overlap was
   slightly negative. Not a lever worth pursuing on either dataset.
-- 23:05 **chi = 8 first results (dense C0, the paper's own model, 3 seeds):**
+- **[7]** **chi = 8 first results (dense C0, the paper's own model, 3 seeds):**
   MNIST **0.9747 +/- 0.0011** vs chi=4's 0.9682 +/- 0.0017 (**+0.65 pp**) -- note this *baseline* at chi=8
   now beats chi=4 *with* shared feedforward (0.9736);
   CIFAR **0.3218 +/- 0.0119** vs 0.2862 +/- 0.0089 (**+3.6 pp**). Doubling the register size helps the
   unmodified architecture everywhere, at 13 ms/step on an L40S (same as chi=4 on a T4). The chi=8
   feedforward arms (C4, L1, L4) are still running.
-- 23:45 **chi = 8 on CIFAR-10 is the headline: every lever compounds.** (3 seeds, 15 epochs, L40S)
+- **[8]** **chi = 8 on CIFAR-10 is the headline: every lever compounds.** (3 seeds, 15 epochs, L40S)
 
   | model | chi = 4 | chi = 8 | delta |
   |---|---|---|---|
@@ -82,30 +86,30 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   both *larger* at chi = 8 than at chi = 4 (+10.5 and +6.5 pp), i.e. a wider register lets the other two
   levers express more. Cost 36 ms/step on an L40S (~$0.47 per 15-epoch job).
   Launched chi=8 x G=2 (the two winners combined) on CIFAR, L4, 3 seeds.
-- 00:15 **chi = 8 on MNIST (3 seeds, 15 epochs):** C0 0.9747 +/- 0.0011, L1 0.9386 +/- 0.0019,
+- **[9]** **chi = 8 on MNIST (3 seeds, 15 epochs):** C0 0.9747 +/- 0.0011, L1 0.9386 +/- 0.0019,
   C4 0.9874 +/- 0.0003, **L4 0.9883 +/- 0.0003** -- the best MNIST number of the whole study (chi=4 was
   0.9820 dense / 0.9759 patch at 15 epochs, 0.9859 at 63 epochs). Two notes:
   (i) at chi = 8 the patch model *matches* the dense one on MNIST (L4-C4 = +0.09 +/- 0.03 pp, McNemar
   n.s. on all seeds) with **150 encoder parameters vs 150,720** -- locality stops being a handicap once
   the registers are wide enough; (ii) feedforward is still worth +4.97 +/- 0.20 pp with the patch encoder.
   MNIST is now clearly saturating (98.8 %), so CIFAR-10 and ImageNet-32 are the discriminating tasks.
-- 00:40 **Feature maps saturate at G = 2 (CIFAR, L4):** G=1 0.4552 -> G=2 0.4737 (+1.85 pp) ->
+- **[10]** **Feature maps saturate at G = 2 (CIFAR, L4):** G=1 0.4552 -> G=2 0.4737 (+1.85 pp) ->
   G=4 0.4798 +/- 0.0018 (+0.61 pp for 1.5x the step cost, 39 vs 26 ms/step). Diminishing returns.
   For comparison chi=8 with G=1 reaches 0.5290 at 36 ms/step -- **widening the registers beats adding
   more of them**, which is the same message as every other null tonight: what matters is how much
   quantum state each vertex carries, not how many classical features feed it.
-- 01:05 **ImageNet-32 is not separating (both chi = 4 and chi = 8).** chi=4 at epoch 10-13:
+- **[11]** **ImageNet-32 is not separating (both chi = 4 and chi = 8).** chi=4 at epoch 10-13:
   baseline 0.38 %, feedforward-B 0.19 % val acc; chi=8 at epoch 2: 0.19-0.26 %. Everything is within a
   few multiples of the 0.1 % chance rate and the configs are not ordered. Reading: 1000 classes through
   a 16- (or 64-) dimensional readout with a *linear* head is the binding constraint, and it is far more
   binding than anything the tree does -- consistent with the CIFAR finding that the fixed readout beats
   a trainable linear head. Report as a negative result; a real ImageNet attempt needs a much wider
   readout (chi >= 32, or several parallel trees concatenated), not more tree capacity.
-- 01:05 **Two-stage "deep kitchen sinks" (partial: T1 3 seeds, T4 1 seed):** T1 0.3822 +/- 0.0024,
+- **[12]** **Two-stage "deep kitchen sinks" (partial: T1 3 seeds, T4 1 seed):** T1 0.3822 +/- 0.0024,
   T4 0.4420 vs the single-tree L1 0.3906 / L4 0.4552. The classical hand-off does *not* beat simply
   contracting one deeper tree, though it is far more parameter-efficient (20,910 TN params vs 79,305).
   Feedforward still helps inside it (+5.5 pp). Full numbers when the last two seeds land.
-- 01:35 **Two-stage "deep kitchen sinks": complete, and it does not help (CIFAR, 3 seeds).**
+- **[13]** **Two-stage "deep kitchen sinks": complete, and it does not help (CIFAR, 3 seeds).**
   T1 0.3822 +/- 0.0024, **T4 0.4329 +/- 0.0055** vs the single-tree L1 0.3906 / L4 0.4552 -- i.e. -0.8 pp
   (baseline) and -2.2 pp (feedforward) for the extra classical hand-off. It *is* parameter-efficient
   (20,910 TN params vs 79,305), but it sits on the same accuracy-vs-parameters curve as the single tree
@@ -113,24 +117,24 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   step buys nothing beyond the parameters it spends. Feedforward still helps inside it (+5.07 +/- 0.42 pp).
   Conclusion: of the four expressivity levers proposed, **bond dimension >> feature maps > (nothing) >
   receptive field = two-stage re-encoding**.
-- 02:30 **chi = 8 and G = 2 do NOT stack (CIFAR, L4, 3 seeds):** 0.5303 +/- 0.0015 vs chi=8 alone
+- **[14]** **chi = 8 and G = 2 do NOT stack (CIFAR, L4, 3 seeds):** 0.5303 +/- 0.0015 vs chi=8 alone
   0.5290 +/- 0.0023 -- +0.13 pp for 2x the parameters (4.65M vs 2.29M) and 1.6x the step cost
   (59 vs 36 ms/step). Once the registers are wide, extra feature maps are redundant: **bond dimension
   subsumes feature maps**. (At chi = 4, G=2 was worth +1.85 pp.) Best CIFAR configuration remains
   chi = 8, G = 1, patch-local, per-vertex feedforward B: **0.5290**.
-- 02:30 **Finite-shot feedforward is cheap (MNIST, C2, 3 seeds)** -- the hardware-realism result:
+- **[15]** **Finite-shot feedforward is cheap (MNIST, C2, 3 seeds)** -- the hardware-realism result:
   exact statistics 0.9736 +/- 0.0018; **1024 shots 0.9735 +/- 0.0014; 128 shots 0.9736 +/- 0.0015;
   16 shots 0.9712 +/- 0.0004**. 128 shots per vertex is indistinguishable from exact and even 16 shots
   costs only 0.24 pp. The multishot feedforward does not need deep statistics to work, which is the
   practical objection one would raise against Case B on real hardware.
-- 03:10 **ImageNet-32, chi = 8 vs chi = 4 (baselines, seed 0):** chi=8 reaches **0.68 % test acc in 7
+- **[16]** **ImageNet-32, chi = 8 vs chi = 4 (baselines, seed 0):** chi=8 reaches **0.68 % test acc in 7
   epochs** vs chi=4's 0.48 % in 15 (chance 0.10 %), i.e. the 64-outcome readout is worth ~+40 % relative
   in less than half the training. The direction confirms the readout diagnosis, but 6.8x chance is still
   useless in absolute terms: a 1000-class problem read out through 64 numbers is the wrong shape.
   What would actually be needed: chi >= 32 (1024 outcomes), or K parallel trees whose readouts are
   concatenated, or a class-structured readout -- not more tree capacity. Recorded as the boundary of the
   approach rather than a result to chase.
-- 03:55 **ImageNet-32 complete (1 seed each, chance = 0.10 %):**
+- **[17]** **ImageNet-32 complete (1 seed each, chance = 0.10 %):**
 
   | model | epochs | test acc | x chance |
   |---|---|---|---|
