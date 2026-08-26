@@ -119,6 +119,29 @@ Longer/deeper follow-up (launched 2026-08-25): sweeps `ff-v2-L6` (128 episodes, 
 **63 epochs** (the fifth cycle boundary), with cycle checkpoints, to test whether the ff-v1 ordering holds
 with longer training and a deeper tree.
 
+## Longer training and deeper trees (sweeps `ff-v2-L6`, `ff-v2-L7`; 63 epochs, 3 seeds)
+
+| depth | C0 baseline | C1 per-vertex baseline | C2 shared B | C4 per-vertex B |
+|---|---|---|---|---|
+| 6 layers (128 episodes), 15 ep (`ff-v1`) | 0.9682 ± 0.0017 | 0.9671 ± 0.0015 | 0.9736 ± 0.0018 | 0.9820 ± 0.0003 |
+| 6 layers, 63 ep | 0.969–0.974 | 0.969–0.974 | 0.980–0.983 | **0.9856–0.9864** |
+| 7 layers (256 episodes), 63 ep | 0.9782 ± 0.0013 | 0.9784 ± 0.0004 | 0.9841 ± 0.0005 | **0.9871 ± 0.0004** |
+
+Four times longer training adds ~0.3 pp to the baselines and ~0.4–0.9 pp to the feedforward models;
+a deeper tree lifts everything by ~1 pp; the ordering is unchanged and every paired comparison
+(C2 − C0, C4 − C1) is positive on all seeds with McNemar p ≤ 3·10⁻⁵ (depth 7). Per-vertex unitaries
+without feedforward remain worthless (C1 − C0 = +0.01 ± 0.10 pp at depth 7).
+
+Two pipeline bugs were found and fixed on 2026-08-25 while extending to new datasets — both leave the
+MNIST results above untouched (60000/32 is exact; MNIST is not class-sorted):
+1. *Windowed index shuffle* (250k-row buffer) on the class-sorted HF ImageNet-32 train split ⇒ training
+   at chance. Now a full permutation of indices every epoch.
+2. *Cosine-schedule drift*: `steps_per_epoch = n // 32` but the ragged last batch was not dropped, so
+   CIFAR-10 (1563 vs 1562 steps) and ImageNet-32 drifted one step per epoch and finished 15 steps into a
+   restarted cycle at peak learning rate (CIFAR-10 val acc fell 0.32 → 0.29 between epochs 14 and 15).
+   Training batches now use `drop_remainder=True`. CIFAR-10 numbers from sweep `cifar10-L5` are
+   therefore superseded by `lenet-v1-cifar`.
+
 ## Other datasets: CIFAR-10 and ImageNet-32 (5-layer trees)
 
 `--task cifar10` (tf.keras) and `--task imagenet32` (HF `benjamin-paine/imagenet-1k-32x32`: ImageNet-1k
@@ -144,6 +167,29 @@ GPU choice (per-vertex B, 5 layers, 3072-dim inputs, batch 32; one ImageNet-32 j
 The step is launch-latency-bound (thousands of 16×16 complex kernels), so larger GPUs barely help;
 T4 is cheapest overall. Sweeps `cifar10-L5` and `imagenet32-L5` (C0, C1, C2, C4 × seed 0, 15 epochs)
 were launched 2026-08-25 on T4s.
+
+## LeNet-style architecture (`qks_tn_lenet.py`, sweeps `lenet-v1-mnist`, `lenet-v1-cifar`)
+
+LeNet's ingredients — local receptive fields, weight sharing across positions, pooling, feature maps,
+FC layers — mapped onto the primitives here:
+
+| LeNet | QKS+TTN primitive |
+|---|---|
+| conv filter on a patch, shared across positions | `PatchQKSEncodingLayer`: two kitchen-sink filters applied to every `patch×patch` window (a `conv2d`); the two angles form one χ=4 leaf register per position. MNIST 7×7/stride 3 → 8×8 positions, **100 encoder parameters** (vs 100,480 dense); CIFAR 4×4×3/stride 4 → 8×8, 98 parameters |
+| feature maps | `groups=G` registers per position (leaves position-major, group-minor: the first log₂G merges are 1×1 channel mixing) |
+| conv + 2×2 pool | a TTN vertex (unitary + dissipative trace) on leaves ordered along a **Z/Morton curve**, so successive merges alternate x and y and every two layers contract a 2×2 block (quadtree) |
+| nonlinearity between stages | feedforward mode B |
+| FC → classes | trainable linear head (`--head linear`) or the paper's fixed readout |
+
+Controls: `R*` = same weights with raster leaf order (isolates 2-D locality in the tree; fully paired
+with `L*` — identical initialisation, permutation only); `U*` = locally connected filters (one filter bank
+per position, 6,400 params on MNIST; isolates weight sharing); dense `C*` (isolates locality).
+σ for the encoder follows the dimensional rule σ = 0.125·√(784/(patch²·C)) (0.50 on MNIST, 0.51 on
+CIFAR); `--sigma-scale` exposes a multiplier. Tests: `tests/test_lenet.py` (patch encoder ≡ dense
+encoder with a patch-sparse position-shared `W`; Morton quadtree structure; parameter counts; seed pairing).
+Expectation stated up front: with a 100-parameter encoder the MNIST models may lose to the 100k-parameter
+dense QKS; the informative comparisons are L4 vs R4 (locality in the tree), L4 vs U4 (sharing) and the
+CIFAR-10 numbers, where the dense encoder is weak (~30 %).
 
 ## Not yet done
 
