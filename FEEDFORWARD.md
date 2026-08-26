@@ -191,6 +191,55 @@ Expectation stated up front: with a 100-parameter encoder the MNIST models may l
 dense QKS; the informative comparisons are L4 vs R4 (locality in the tree), L4 vs U4 (sharing) and the
 CIFAR-10 numbers, where the dense encoder is weak (~30 %).
 
+### Results (15 epochs, 3 seeds; CIFAR-10 dense controls re-run with the fixed schedule)
+
+| config | model | TN params | trainable | CIFAR-10 test acc | MNIST test acc |
+|---|---|---|---|---|---|
+| C0 | dense, baseline (shared) — the paper's model | 1,530 | 394,874 | 0.2862 ± 0.0089 | 0.9682 ± 0.0017* |
+| C1 | dense, baseline (per-vertex) | 16,065 | 409,409 | 0.3387 ± 0.0032 | 0.9671 ± 0.0015* |
+| C4 | dense, B (per-vertex) | 79,305 | 472,649 | 0.3501 ± 0.0084 | 0.9820 ± 0.0003* |
+| L0 | patch, Morton, baseline (shared) | 1,530 | **1,628** | 0.3277 ± 0.0042 | 0.8057 ± 0.0040 |
+| L1 | patch, Morton, baseline (per-vertex) | 16,065 | 16,163 | 0.3906 ± 0.0027 | 0.8809 ± 0.0096 |
+| L2 | patch, Morton, B (shared) | 11,730 | 11,828 | 0.4022 ± 0.0043 | 0.9583 ± 0.0004 |
+| **L4** | **patch, Morton, B (per-vertex)** | 79,305 | 79,403 | **0.4552 ± 0.0042** | **0.9759 ± 0.0027** |
+| R4 | patch, raster, B (per-vertex) | 79,305 | 79,403 | 0.4512 ± 0.0029 | 0.9745 ± 0.0019 |
+| U4 | locally connected, B (per-vertex) | 79,305 | 85,577 | 0.4630 ± 0.0002 | 0.9766 ± 0.0004 |
+| L4lin | L4 with a trainable linear head | 79,305 | 79,573 | 0.3702 ± 0.0081 | 0.9476 ± 0.0295 |
+
+\* MNIST dense numbers from sweep `ff-v1` (same protocol, 6-layer tree).
+
+Paired per-seed differences (all "+++"/"−−−" = same sign on every seed):
+
+| comparison | isolates | CIFAR-10 Δ acc | MNIST Δ acc |
+|---|---|---|---|
+| L4 − C4 | the whole LeNet-style change vs dense | **+10.52 ± 0.71 pp** (p ≤ 3e−79) | −0.6 pp |
+| U4 − C4 | locality alone (unshared filters) | **+11.29 ± 0.86 pp** | — |
+| L4 − L1 | feedforward B with a patch encoder | **+6.47 ± 0.68 pp** | **+9.50 ± 0.93 pp** |
+| L2 − L0 | feedforward B, shared unitaries | +7.45 ± 0.58 pp | **+15.27 ± 0.41 pp** |
+| L4 − R4 | Morton (quadtree) vs raster leaf order | +0.41 ± 0.14 pp (McNemar n.s.) | +0.14 ± 0.21 pp |
+| L4 − U4 | position-shared vs per-position filters | −0.78 ± 0.44 pp | −0.07 ± 0.29 pp |
+| L4lin − L4 | trainable linear head vs fixed readout | **−8.51 ± 0.44 pp** | −2.83 ± 2.68 pp |
+
+![CIFAR-10 patch encoder](img/lenet-v1-cifar_curves.png)
+![MNIST patch encoder](img/lenet-v1-mnist_curves.png)
+
+**Reading.**
+1. **Locality is the dominant factor on CIFAR-10**: 0.286 → 0.455 (+16.9 pp over the paper's model,
+   +10.5 pp over dense per-vertex B) with **6× fewer trainable parameters** (79k vs 473k), because the
+   98-parameter shared encoder replaces 196,672 dense QKS weights.
+2. **Feedforward and locality are complementary and roughly additive**: +11 pp from locality, +6.5 pp
+   from feedforward, both positive on every seed.
+3. **The quadtree ordering does not matter** (L4 − R4 ≈ +0.4 pp on CIFAR, +0.1 pp on MNIST, McNemar
+   n.s.): what helps is that each leaf sees a *local patch*, not that siblings are spatial neighbours.
+4. **Weight sharing is free**: 98 shared filter parameters match 6,272 per-position ones to within
+   ±0.8 pp on both datasets (U4 is marginally ahead on CIFAR).
+5. **On MNIST the patch model nearly matches the dense one** (0.9759 vs 0.9820) with a 100-parameter
+   encoder instead of 100,480 — and feedforward is worth far more there (+9.5 to +15.3 pp) than with
+   the dense encoder (+0.5 pp), the same pattern as the frozen-QKS experiment: mode B carries the model
+   when the features are weak.
+6. **The fixed 16→10 readout beats a trainable linear head** (−8.5 pp on CIFAR). Capacity is not the
+   constraint at the readout; keeping the outputs as normalised probabilities is.
+
 ## Not yet done
 
 - Finite-shot noise (`--shots 16/128/1024`, configs `C2s*`), `--ff-layers` ablations (root only /

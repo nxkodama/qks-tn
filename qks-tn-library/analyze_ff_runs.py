@@ -51,6 +51,7 @@ COMPARISONS = [
     ("L4", "L1", "feedforward B vs baseline with the patch encoder"),
     ("L2", "L0", "shared B vs shared baseline with the patch encoder"),
     ("R4", "R1", "feedforward B vs baseline, raster order"),
+    ("L4lin", "L4", "trainable linear head vs the paper's fixed readout"),
     ("F2", "F0", "B vs baseline with frozen QKS (TN-only learning)"),
     ("F5", "F0", "A vs baseline with frozen QKS (TN-only learning)"),
     ("C0", "C0old", "new sweep vs original TNLayer implementation (regression)"),
@@ -62,7 +63,7 @@ PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4
 SLOT = {"C0": 0, "C1": 1, "C2": 2, "C3": 3, "C4": 4, "C5": 5, "C6": 7, "C0old": 6, "C2c": 7}
 SLOT.update({"F0": SLOT["C0"], "F2": SLOT["C2"], "F5": SLOT["C5"]})
 SLOT.update({"C2s16": 2, "C2s128": 2, "C2s1024": 2, "C2root": 2, "C2top2": 2})
-SLOT.update({"L0": 0, "L1": 1, "L2": 2, "L4": 4, "R1": 3, "R4": 5, "U1": 6, "U4": 7})
+SLOT.update({"L0": 0, "L1": 1, "L2": 2, "L4": 4, "R1": 3, "R4": 5, "U1": 6, "U4": 7, "L4lin": 3, "C4lin": 3})
 LABEL = {
     "C0": "baseline (shared)",
     "C1": "baseline (per-vertex)",
@@ -89,14 +90,21 @@ LABEL = {
     "R4": "patch, raster, B (per-vertex)",
     "U1": "local unshared, baseline (per-vertex)",
     "U4": "local unshared, B (per-vertex)",
+    "L4lin": "patch, Morton, B (per-vertex), linear head",
+    "C4lin": "dense, B (per-vertex), linear head",
 }
 _MATCH_KEYS = ["mode", "share_per_layer", "ff_null", "shots", "ff_layers", "ff_features", "freeze_qks", "impl",
-               "encoder", "leaf_order", "share_positions"]
+               "encoder", "leaf_order", "share_positions", "head", "nepisodes"]
 
 
 def infer_config(cfg: dict) -> str:
-    if cfg.get("config"):
-        return cfg["config"]
+    name = cfg.get("config")
+    if name:
+        # a run launched from a named config but with an overridden head is a distinct arm
+        ref = rfe.make_cfg(**rfe.CONFIGS[name]) if name in rfe.CONFIGS else {}
+        if str(cfg.get("head")) != str(ref.get("head", "auto")) and str(cfg.get("head")) == "linear":
+            return name + "lin"
+        return name
     for name, ov in rfe.CONFIGS.items():
         ref = rfe.make_cfg(**ov)
         if all(str(cfg.get(k)) == str(ref.get(k)) for k in _MATCH_KEYS):
@@ -248,7 +256,10 @@ def plot_curves(groups, out_prefix, facet_name, configs):
             ax.set_yscale("log")
     for ax in axes[1]:
         ax.set_xlabel("epoch", color=ink2, fontsize=9)
-    fig.suptitle(f"QKS+TTN on MNIST — {facet_name}", x=0.01, ha="left", fontsize=12, color=ink)
+    tasks = sorted({r["cfg"]["task"] for c in configs for r in groups[c]})
+    task_name = {"binary": "(3 vs 5)-MNIST", "multiclass": "MNIST", "cifar10": "CIFAR-10", "imagenet32": "ImageNet-32"}
+    dataset = " / ".join(task_name.get(t, t) for t in tasks)
+    fig.suptitle(f"QKS+TTN on {dataset} — {facet_name}", x=0.01, ha="left", fontsize=12, color=ink)
     fig.legend(
         [handles[c] for c in configs if c in handles],
         [LABEL.get(c, c) for c in configs if c in handles],
@@ -289,7 +300,7 @@ def main(argv=None):
     for facet, confs in [
         ("trainable QKS", ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C0old"]),
         ("frozen QKS", ["F0", "F2", "F5"]),
-        ("patch encoder", ["L0", "L1", "L2", "L4", "R1", "R4", "U1", "U4"]),
+        ("patch encoder", ["L0", "L1", "L2", "L4", "R1", "R4", "U1", "U4", "L4lin"]),
         ("ablations", ["C2", "C2c", "C2s16", "C2s128", "C2s1024", "C2root", "C2top2"]),
     ]:
         present = [c for c in confs if c in groups]

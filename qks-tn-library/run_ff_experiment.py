@@ -106,6 +106,9 @@ CONFIGS = {
     # ... and locally connected filters (same receptive fields, no weight sharing)
     "U1": dict(encoder="patch", leaf_order="morton", share_positions=False, mode="baseline", share_per_layer=False),
     "U4": dict(encoder="patch", leaf_order="morton", share_positions=False, mode="B", share_per_layer=False),
+    # trainable-logits head variants (the paper's fixed readout is the default)
+    "L4lin": dict(encoder="patch", leaf_order="morton", mode="B", share_per_layer=False, head="linear"),
+    "C4lin": dict(mode="B", share_per_layer=False, head="linear"),
 }
 
 
