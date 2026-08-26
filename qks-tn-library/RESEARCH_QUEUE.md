@@ -25,7 +25,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   **Benchmarked 22:00:** L40S 37 ms/step ($0.47/job), A100-40GB 50 ($0.68), T4 135 ($0.52) — as predicted
   the step is now compute-bound and the L40S wins on both speed and cost; use `--gpu L40S` for chi=8.
   Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched 22:02 on L40S.
-- [ ] **D. χ = 8 on ImageNet-32** — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
+- [~] **D. χ = 8 on ImageNet-32** (launched 23:05: C0,C4 x seed 0, 7 epochs, L40S, ~$11) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
   epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
 - [ ] **E. Two-stage "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
   into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
@@ -58,3 +58,12 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   C2 0.9809 +/- 0.0009, **C4 0.9859 +/- 0.0003**. Every ff-v1 ordering survives 4x longer training:
   C2-C0 = +0.98 +/- 0.21 pp, C4-C1 = +1.39 +/- 0.18 pp (both +++ , McNemar p <= 3e-6); per-vertex
   unitaries alone remain worthless (C1-C0 = +0.08 +/- 0.08 pp, n.s. on all three seeds).
+- 23:05 **MNIST overlapping patches (9x9/s3/p1): marginal.** L1 0.8952 +/- 0.0013, L4 0.9780 +/- 0.0009
+  vs 7x7/s3's 0.8809 / 0.9759 -- a small (+0.2 pp on L4) gain, unlike the CIFAR case where overlap was
+  slightly negative. Not a lever worth pursuing on either dataset.
+- 23:05 **chi = 8 first results (dense C0, the paper's own model, 3 seeds):**
+  MNIST **0.9747 +/- 0.0011** vs chi=4's 0.9682 +/- 0.0017 (**+0.65 pp**) -- note this *baseline* at chi=8
+  now beats chi=4 *with* shared feedforward (0.9736);
+  CIFAR **0.3218 +/- 0.0119** vs 0.2862 +/- 0.0089 (**+3.6 pp**). Doubling the register size helps the
+  unmodified architecture everywhere, at 13 ms/step on an L40S (same as chi=4 on a T4). The chi=8
+  feedforward arms (C4, L1, L4) are still running.
