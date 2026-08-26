@@ -111,6 +111,25 @@ with. At 64x64 unitaries the step becomes compute-bound, which flips the hardwar
 both the fastest and the cheapest option (37 ms/step, $0.47 per 15-epoch job) where a T4 was cheapest at
 chi = 4.
 
+### Two-stage "deep kitchen sinks" (`qks_tn_twostage.py`, sweep `twostage-cifar`)
+
+LeNet's second convolution has a quantum analogue: measure after the first pooling stage and re-encode
+the resulting statistics. Implemented by folding each 2×2 block into the batch (so stage-1 unitaries are
+shared across blocks, as a convolution's are), contracting a 2-layer tree, scattering the 16 block
+outcome distributions back onto a 4×4×16 classical field, and re-encoding it with a second 3×3 patch
+encoder and tree.
+
+| model | TN params | CIFAR-10 test acc |
+|---|---|---|
+| L2 single tree, shared B | 11,730 | 0.4022 ± 0.0043 |
+| **T4 two-stage, per-vertex B** | 20,910 | 0.4329 ± 0.0055 |
+| L4 single tree, per-vertex B | 79,305 | 0.4552 ± 0.0042 |
+
+**Negative result**: the two-stage model lands *on* the single tree's accuracy-vs-parameters curve, not
+above it — the classical re-encoding buys nothing beyond the parameters it spends (−2.2 pp against L4 at
+4× fewer parameters). Feedforward still helps inside it (+5.1 ± 0.4 pp). Ranking of the expressivity
+levers tested: **bond dimension ≫ feature maps > receptive field ≈ two-stage re-encoding ≈ nothing**.
+
 ## Checkpointing and training for more epochs
 
 Every run writes a `tf.train.Checkpoint` (model weights, AdamW moments and the optimizer step counter that

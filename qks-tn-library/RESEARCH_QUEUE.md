@@ -27,7 +27,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched 22:02 on L40S.
 - [~] **D. χ = 8 on ImageNet-32** (launched 23:05: C0,C4 x seed 0, 7 epochs, L40S, ~$11) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
   epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
-- [~] **E. Two-stage (implemented + `twostage-cifar` launched 23:45) "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
+- [x] **E. Two-stage (implemented, run, negative result) "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
   into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
   with a second patch-QKS on the 4×4×16 field, second tree, head. Implement only if time remains after
   C/D; helpers `fold_blocks`/`unfold_blocks` were specified but not written.
@@ -105,3 +105,11 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   T4 0.4420 vs the single-tree L1 0.3906 / L4 0.4552. The classical hand-off does *not* beat simply
   contracting one deeper tree, though it is far more parameter-efficient (20,910 TN params vs 79,305).
   Feedforward still helps inside it (+5.5 pp). Full numbers when the last two seeds land.
+- 01:35 **Two-stage "deep kitchen sinks": complete, and it does not help (CIFAR, 3 seeds).**
+  T1 0.3822 +/- 0.0024, **T4 0.4329 +/- 0.0055** vs the single-tree L1 0.3906 / L4 0.4552 -- i.e. -0.8 pp
+  (baseline) and -2.2 pp (feedforward) for the extra classical hand-off. It *is* parameter-efficient
+  (20,910 TN params vs 79,305), but it sits on the same accuracy-vs-parameters curve as the single tree
+  (L2: 11,828 params -> 0.4022; T4: 21,298 -> 0.4329; L4: 79,403 -> 0.4552), so the measure-and-re-encode
+  step buys nothing beyond the parameters it spends. Feedforward still helps inside it (+5.07 +/- 0.42 pp).
+  Conclusion: of the four expressivity levers proposed, **bond dimension >> feature maps > (nothing) >
+  receptive field = two-stage re-encoding**.
