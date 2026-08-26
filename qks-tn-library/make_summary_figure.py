@@ -30,6 +30,8 @@ ROWS = [
     ("cifar10", "two-stage re-encoding", dict(encoder="twostage", mode="B", share=False, chi=4, groups=1)),
     ("cifar10", "chi=8, patch, no feedforward", dict(encoder="patch", mode="baseline", share=False, chi=8, groups=1)),
     ("cifar10", "chi=8, patch + feedforward B", dict(encoder="patch", mode="B", share=False, chi=8, groups=1)),
+    ("cifar10", "chi=16, patch, no feedforward", dict(encoder="patch", mode="baseline", share=True, chi=16, groups=1)),
+    ("cifar10", "chi=16, patch + feedforward B", dict(encoder="patch", mode="B", share=True, chi=16, groups=1)),
     ("multiclass", "paper's model (dense, chi=4)", dict(encoder="dense", mode="baseline", share=True, chi=4, groups=1)),
     ("multiclass", "+ feedforward B", dict(encoder="dense", mode="B", share=False, chi=4, groups=1)),
     ("multiclass", "+ patch-local encoder", dict(encoder="patch", mode="baseline", share=False, chi=4, groups=1)),
@@ -117,7 +119,7 @@ def main():
     import matplotlib.pyplot as plt
 
     runs = load_all()
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6.5), facecolor=SURFACE, gridspec_kw=dict(width_ratios=[1, 1]))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7.0), facecolor=SURFACE, gridspec_kw=dict(width_ratios=[1, 1]))
     for ax, task, title in ((axes[0], "cifar10", "CIFAR-10"), (axes[1], "multiclass", "MNIST")):
         rows = [(lab, m) for t, lab, m in ROWS if t == task]
         labels, means, errs, colors = [], [], [], []
@@ -148,8 +150,8 @@ def main():
         ax.set_title(f"{title} — test accuracy", loc="left", fontsize=11, color=INK)
         for yi, (mu, e) in enumerate(zip(means, errs)):
             ax.text(mu + e + (xlim[1] - xlim[0]) * 0.012, yi, f"{mu:.4f}", va="center", fontsize=9, color=INK)
-    handles = [plt.Rectangle((0, 0), 1, 1, color=PALETTE[c]) for c in (4, 8)]
-    fig.legend(handles, ["bond dimension χ = 4", "χ = 8"], loc="lower center", ncol=2, frameon=False, fontsize=10, labelcolor=INK2)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=PALETTE[c]) for c in (4, 8, 16)]
+    fig.legend(handles, ["bond dimension χ = 4", "χ = 8", "χ = 16"], loc="lower center", ncol=2, frameon=False, fontsize=10, labelcolor=INK2)
     fig.suptitle(
         "QKS+TTN: what each architectural change is worth (15 epochs, fixed readout, mean ± s.e.m. over seeds)",
         x=0.01, ha="left", fontsize=12.5, color=INK,

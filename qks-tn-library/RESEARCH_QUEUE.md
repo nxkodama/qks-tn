@@ -156,13 +156,17 @@ times: the night's work began ~21:30 PDT 2026-08-25 and this correction was made
   1.28 M images for 7 epochs is under-trained, not over-capacity (its training accuracy was still rising
   at 0.0031). Nothing to conclude beyond the scope statement already recorded: ImageNet-32 is
   readout-bound for this ansatz and is not a productive target without a much wider readout.
-- **[19]** **chi = 16 unblocked and running.** The dense Hermitian basis is (K, d, d): 0.13 GB at chi=8
+- **[19]** **chi = 16 unblocked, and it is the best model of the study.** The dense Hermitian basis is (K, d, d): 0.13 GB at chi=8
   but **34 GB at chi=16**, which is why chi=8 was the practical ceiling. Replaced by a scatter-based
   construction (`params_to_hermitian_scatter`, auto-selected above chi=8, numerically identical to the
   basis version and covered by a test). First data point, CIFAR L0 (patch, shared unitaries, no
   feedforward), 1 seed: **chi=4 0.3277 -> chi=16 0.4240** (84 ms/step, 393,210 TN params, 256-outcome
-  readout). The bond-dimension lever has still not saturated. The mode-B arm at chi=16 runs at
-  447 ms/step (~3 h) and is in progress.
+  readout). The bond-dimension lever has still not saturated. Final numbers (CIFAR, patch encoder, shared unitaries, 1 seed):
+  baseline **0.4240** (393,210 TN params, 84 ms/step) and with feedforward B **0.5644** (10.9 M params,
+  426 ms/step) -- **the best CIFAR-10 result of the whole study**, beating chi=8 per-vertex B (0.5290),
+  and feedforward is worth **+14.0 pp** at chi=16 (vs +8.2 at chi=8, +6.5 at chi=4). The bond-dimension
+  ladder for patch + feedforward B: chi=4 shared 0.4022 -> chi=4 per-vertex 0.4552 -> chi=8 per-vertex
+  0.5290 -> **chi=16 shared 0.5644**. Still no sign of saturation.
 
 ---
 
@@ -189,13 +193,15 @@ On CIFAR-10, three independent changes to the published model compound:
 | + multishot feedforward (mode B, per-vertex) | 0.4552 +/- 0.0042 |
 | + bond dimension chi = 8 | **0.5290 +/- 0.0023** |
 
-**+24.3 pp, 85 % relative**, every step positive on every seed. On MNIST the same stack reaches
+**+24.3 pp, 85 % relative**, every step positive on every seed. Adding chi = 16 (single seed, run after
+this table was drafted) takes it to **0.5644 -- +27.8 pp, 97 % relative** over the published model. On MNIST the same stack reaches
 **0.9883 +/- 0.0003** (paper: 0.9673), and there the 150-parameter patch encoder *matches* the
 150,720-parameter dense one.
 
 ## Ranking of the expressivity levers (all measured, 3 seeds each)
-1. **Bond dimension** chi 4 -> 8: +7.4 pp on the best CIFAR model; also subsumes feature maps.
-2. **Feedforward** (mode B): +6.5 pp at chi=4, +8.2 pp at chi=8 -- and the gain *grows* with chi.
+1. **Bond dimension** chi 4 -> 8 -> 16: +7.4 pp then a further +3.5 pp on the best CIFAR model; also
+   subsumes feature maps, and the feedforward gain *grows* with it (+6.5 / +8.2 / +14.0 pp).
+2. **Feedforward** (mode B): +6.5 pp at chi=4, +8.2 pp at chi=8, +14.0 pp at chi=16.
 3. **Locality** (patch encoder): +10.5 pp at chi=4, +15.1 pp at chi=8.
 4. **Feature maps** G: +1.85 pp at G=2, +0.61 pp more at G=4, **+0.13 pp at chi=8** (redundant once
    registers are wide).
@@ -230,3 +236,17 @@ On CIFAR-10, three independent changes to the published model compound:
 3. A wider readout for many-class problems (parallel trees concatenated, or a structured class code) if
    ImageNet-scale is wanted at all.
 4. Unrun ablations: `--ff-layers` (root-only / top-two) and centred features at chi = 8.
+
+---
+
+## Night closed out (03:40 PDT 2026-08-26)
+
+Every queue item is complete and the compute budget (~$37 of $40) is spent, so the loop is stopping
+about two hours before the nominal 06:00 mark rather than idling. Final state:
+
+- **Best CIFAR-10**: 0.5644 (patch-local encoder + multishot feedforward, chi = 16, shared unitaries)
+  against the published model's 0.2862 -- **+27.8 pp**.
+- **Best MNIST**: 0.9883 +/- 0.0003 (patch + feedforward, chi = 8) against 0.9682.
+- 29 commits on branch `feedforward`; nothing pushed.
+- Everything reproducible: `FEEDFORWARD.md` (write-up + figures), this queue (chronological log),
+  `qks-tn-library/results/<sweep>/` (per-epoch histories + per-cycle checkpoints on the Modal volume).

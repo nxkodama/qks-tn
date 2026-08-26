@@ -187,7 +187,11 @@ the ceiling. First CIFAR-10 data point for the shared-unitary patch baseline wit
 | 4 | 16 | 1,530 | 0.3277 ± 0.0042 | 13 |
 | 16 | 256 | 393,210 | 0.4240 (1 seed) | 84 |
 
-Bond dimension has not saturated.
+and with feedforward B on the same shared-unitary patch model, chi = 16 reaches **0.5644** (10.9 M TN
+parameters, 426 ms/step) — **the best CIFAR-10 result in this study**, above chi = 8 per-vertex B
+(0.5290) and **+27.8 pp over the published model**. The feedforward gain itself keeps growing with the
+register width: **+6.5 pp at chi = 4, +8.2 pp at chi = 8, +14.0 pp at chi = 16**. Bond dimension has not
+saturated, and it is the lever that makes the others pay.
 
 ## Checkpointing and training for more epochs
 
