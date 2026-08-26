@@ -1,0 +1,287 @@
+"""Summarise and plot feedforward-vs-baseline runs.
+
+Reads result JSONs written by ``run_ff_experiment.py`` / ``modal_ff_sweep.py`` and produces
+
+* a markdown table per configuration (mean +/- s.e.m. over seeds of final test acc/CE,
+  best validation acc, TN parameter count, ms/step),
+* paired per-seed comparisons against the pre-registered controls (same seed = same
+  QKS init, TN init and data order) with a McNemar exact test on the test-set errors,
+* training / validation loss and accuracy curves (one figure per facet: trainable QKS,
+  frozen QKS), thin lines per seed and a thick mean per configuration.
+
+Usage::
+
+    .venv/bin/python qks-tn-library/analyze_ff_runs.py --sweep ff-v1          # results/ff-v1/*.json
+    .venv/bin/python qks-tn-library/analyze_ff_runs.py --dir qks-tn-library/runs --tag binary-local
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import math
+import os
+import sys
+from collections import defaultdict
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import run_ff_experiment as rfe  # noqa: E402
+
+# Controls: (candidate, control, what the comparison isolates)
+COMPARISONS = [
+    ("C1", "C0", "per-vertex unitaries vs shared (more parameters, no feedforward)"),
+    ("C2", "C0", "multishot feedforward (B) vs baseline"),
+    ("C3", "C0", "information-free B (constant p) vs baseline: reparametrisation only"),
+    ("C2", "C3", "B vs its information-free twin: value of the fed-forward information"),
+    ("C4", "C1", "per-vertex B vs per-vertex baseline"),
+    ("C5", "C0", "single-shot feedforward (A) vs baseline"),
+    ("C5", "C1", "A vs parameter-matched per-vertex baseline"),
+    ("F2", "F0", "B vs baseline with frozen QKS (TN-only learning)"),
+    ("F5", "F0", "A vs baseline with frozen QKS (TN-only learning)"),
+    ("C0", "C0old", "new sweep vs original TNLayer implementation (regression)"),
+]
+
+# Fixed categorical slot per *model type* (colour follows the entity, never the rank).
+# Palette: dataviz reference categorical order (light surface).
+PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+SLOT = {"C0": 0, "C1": 1, "C2": 2, "C3": 3, "C4": 4, "C5": 5, "C0old": 6, "C2c": 7}
+SLOT.update({"F0": SLOT["C0"], "F2": SLOT["C2"], "F5": SLOT["C5"]})
+SLOT.update({"C2s16": 2, "C2s128": 2, "C2s1024": 2, "C2root": 2, "C2top2": 2})
+LABEL = {
+    "C0": "baseline (shared)",
+    "C1": "baseline (per-vertex)",
+    "C2": "B: multishot feedforward",
+    "C3": "B, constant p (null)",
+    "C4": "B (per-vertex)",
+    "C5": "A: single-shot feedforward",
+    "C0old": "baseline, original TNLayer",
+    "F0": "baseline (shared)",
+    "F2": "B: multishot feedforward",
+    "F5": "A: single-shot feedforward",
+    "C2c": "B, centred features",
+    "C2s16": "B, 16 shots",
+    "C2s128": "B, 128 shots",
+    "C2s1024": "B, 1024 shots",
+    "C2root": "B, root only",
+    "C2top2": "B, layers 4-5",
+}
+_MATCH_KEYS = ["mode", "share_per_layer", "ff_null", "shots", "ff_layers", "ff_features", "freeze_qks", "impl"]
+
+
+def infer_config(cfg: dict) -> str:
+    if cfg.get("config"):
+        return cfg["config"]
+    for name, ov in rfe.CONFIGS.items():
+        ref = rfe.make_cfg(**ov)
+        if all(str(cfg.get(k)) == str(ref.get(k)) for k in _MATCH_KEYS):
+            return name
+    return cfg.get("name", "?")
+
+
+def load_results(paths):
+    runs = []
+    for p in paths:
+        if os.path.basename(p) in ("summary.json",) or os.path.basename(p).startswith("smoke"):
+            continue
+        with open(p) as f:
+            r = json.load(f)
+        if "epochs" not in r or "final_test" not in r:
+            continue
+        r["config"] = infer_config(r["cfg"])
+        r["seed"] = int(r["cfg"]["seed"])
+        runs.append(r)
+    return runs
+
+
+def mean_sem(x):
+    x = np.asarray(x, dtype=float)
+    if len(x) == 0:
+        return float("nan"), float("nan")
+    if len(x) == 1:
+        return float(x[0]), float("nan")
+    return float(x.mean()), float(x.std(ddof=1) / math.sqrt(len(x)))
+
+
+def fmt(m, s, digits=4):
+    if np.isnan(s):
+        return f"{m:.{digits}f}"
+    return f"{m:.{digits}f} ± {s:.{digits}f}"
+
+
+def mcnemar_p(errors_a, errors_b):
+    """Exact two-sided McNemar test on discordant test-set errors."""
+    a, b = set(errors_a), set(errors_b)
+    n_a_only, n_b_only = len(a - b), len(b - a)
+    n = n_a_only + n_b_only
+    if n == 0:
+        return 1.0, n_a_only, n_b_only
+    try:
+        from scipy.stats import binomtest
+
+        p = binomtest(min(n_a_only, n_b_only), n, 0.5, alternative="two-sided").pvalue
+    except Exception:  # noqa: BLE001
+        from scipy.stats import binom
+
+        k = min(n_a_only, n_b_only)
+        p = min(1.0, 2 * binom.cdf(k, n, 0.5))
+    return float(p), n_a_only, n_b_only
+
+
+def summary_table(groups):
+    lines = [
+        "| config | model | seeds | TN params | trainable | final test acc | final test CE | best val acc (epoch) | ms/step | min/run |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for c in sorted(groups, key=lambda k: (k not in SLOT, SLOT.get(k, 99), k)):
+        rs = groups[c]
+        acc = mean_sem([r["final_test"]["acc"] for r in rs])
+        ce = mean_sem([r["final_test"]["loss"] for r in rs])
+        bv = mean_sem([r["best_val"]["val_acc"] for r in rs if r.get("best_val")])
+        ep = np.mean([r["best_val"]["epoch"] for r in rs if r.get("best_val")]) if any(r.get("best_val") for r in rs) else float("nan")
+        ms = np.median([r["ms_per_step"] for r in rs])
+        wall = np.mean([r["total_wall_s"] / 60 for r in rs])
+        lines.append(
+            f"| {c} | {LABEL.get(c, c)} | {len(rs)} | {rs[0]['params']['tn']:,} | {rs[0]['params']['trainable']:,} | "
+            f"{fmt(*acc)} | {fmt(*ce)} | {fmt(*bv)} ({ep:.1f}) | {ms:.0f} | {wall:.1f} |"
+        )
+    return "\n".join(lines)
+
+
+def comparison_table(groups):
+    lines = [
+        "| candidate | control | isolates | seeds | Δ test acc (pp) | Δ test CE | sign | McNemar p per seed |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for cand, ctrl, what in COMPARISONS:
+        if cand not in groups or ctrl not in groups:
+            continue
+        by_seed_c = {r["seed"]: r for r in groups[cand]}
+        by_seed_k = {r["seed"]: r for r in groups[ctrl]}
+        seeds = sorted(set(by_seed_c) & set(by_seed_k))
+        if not seeds:
+            continue
+        d_acc = [100 * (by_seed_c[s]["final_test"]["acc"] - by_seed_k[s]["final_test"]["acc"]) for s in seeds]
+        d_ce = [by_seed_c[s]["final_test"]["loss"] - by_seed_k[s]["final_test"]["loss"] for s in seeds]
+        ps = []
+        for s in seeds:
+            p, na, nb = mcnemar_p(by_seed_c[s].get("test_errors", []), by_seed_k[s].get("test_errors", []))
+            ps.append(f"s{s}: p={p:.3g} ({na}/{nb})")
+        sign = "+" * sum(d > 0 for d in d_acc) + "-" * sum(d < 0 for d in d_acc) + "0" * sum(d == 0 for d in d_acc)
+        ma, sa = mean_sem(d_acc)
+        mc, sc = mean_sem(d_ce)
+        lines.append(f"| {cand} | {ctrl} | {what} | {len(seeds)} | {fmt(ma, sa, 2)} | {fmt(mc, sc, 4)} | {sign} | {'; '.join(ps)} |")
+    lines.append("")
+    lines.append("Δ = candidate − control, paired by seed. McNemar counts are (errors only in candidate / errors only in control).")
+    return "\n".join(lines)
+
+
+def plot_curves(groups, out_prefix, facet_name, configs):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    configs = [c for c in configs if c in groups]
+    if not configs:
+        return None
+    surface, ink, ink2, grid = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e5e1"
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7.5), facecolor=surface, sharex=True)
+    panels = [
+        (axes[0, 0], "loss", "training loss (CE)"),
+        (axes[0, 1], "val_loss", "validation loss (CE, test set)"),
+        (axes[1, 0], "acc", "training accuracy"),
+        (axes[1, 1], "val_acc", "validation accuracy (test set)"),
+    ]
+    handles = {}
+    for ax, key, title in panels:
+        ax.set_facecolor(surface)
+        for c in configs:
+            color = PALETTE[SLOT.get(c, 7) % len(PALETTE)]
+            curves = []
+            for r in groups[c]:
+                ep = [h["epoch"] for h in r["epochs"] if h.get(key) is not None]
+                v = [h[key] for h in r["epochs"] if h.get(key) is not None]
+                if not v:
+                    continue
+                curves.append((ep, v))
+                ax.plot(ep, v, color=color, lw=0.9, alpha=0.35)
+            if curves:
+                n = min(len(v) for _, v in curves)
+                mean = np.mean([v[:n] for _, v in curves], axis=0)
+                (h,) = ax.plot(curves[0][0][:n], mean, color=color, lw=2.0, label=LABEL.get(c, c))
+                handles[c] = h
+        ax.set_title(title, loc="left", fontsize=10, color=ink)
+        ax.grid(True, color=grid, lw=0.8)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(grid)
+        ax.tick_params(colors=ink2, labelsize=8.5)
+        if "loss" in key:
+            ax.set_yscale("log")
+    for ax in axes[1]:
+        ax.set_xlabel("epoch", color=ink2, fontsize=9)
+    fig.suptitle(f"QKS+TTN on MNIST — {facet_name}", x=0.01, ha="left", fontsize=12, color=ink)
+    fig.legend(
+        [handles[c] for c in configs if c in handles],
+        [LABEL.get(c, c) for c in configs if c in handles],
+        loc="lower center",
+        ncol=min(3, len(handles)),
+        frameon=False,
+        fontsize=9,
+        labelcolor=ink2,
+    )
+    fig.tight_layout(rect=(0, 0.08, 1, 0.96))
+    path = f"{out_prefix}_{facet_name.replace(' ', '_')}.png"
+    fig.savefig(path, dpi=150, facecolor=surface)
+    plt.close(fig)
+    return path
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sweep", help="name under qks-tn-library/results/")
+    ap.add_argument("--dir", help="directory of result JSONs (alternative to --sweep)")
+    ap.add_argument("--tag", default=None, help="output file prefix (default: sweep name)")
+    args = ap.parse_args(argv)
+    if not args.sweep and not args.dir:
+        ap.error("give --sweep or --dir")
+    d = args.dir or os.path.join(HERE, "results", args.sweep)
+    tag = args.tag or args.sweep or os.path.basename(os.path.normpath(d))
+    runs = load_results(sorted(glob.glob(os.path.join(d, "*.json"))))
+    if not runs:
+        print(f"no results in {d}")
+        return
+    groups = defaultdict(list)
+    for r in runs:
+        groups[r["config"]].append(r)
+    tasks = sorted({r["cfg"]["task"] for r in runs})
+    md = [f"# {tag}: {len(runs)} runs, task(s) {', '.join(tasks)}", "", "## Per configuration", "", summary_table(groups), "", "## Paired comparisons", "", comparison_table(groups), ""]
+    prefix = os.path.join(d, f"{tag}")
+    figs = []
+    for facet, confs in [
+        ("trainable QKS", ["C0", "C1", "C2", "C3", "C4", "C5", "C0old"]),
+        ("frozen QKS", ["F0", "F2", "F5"]),
+        ("ablations", ["C2", "C2c", "C2s16", "C2s128", "C2s1024", "C2root", "C2top2"]),
+    ]:
+        present = [c for c in confs if c in groups]
+        if facet == "ablations" and len(present) < 2:
+            continue
+        p = plot_curves(groups, prefix + "_curves", facet, confs)
+        if p:
+            figs.append(p)
+    md += ["## Figures", ""] + [f"- `{os.path.relpath(p, HERE)}`" for p in figs]
+    text = "\n".join(md)
+    with open(prefix + "_summary.md", "w") as f:
+        f.write(text + "\n")
+    print(text)
+    print(f"\nwrote {prefix}_summary.md")
+
+
+if __name__ == "__main__":
+    main()

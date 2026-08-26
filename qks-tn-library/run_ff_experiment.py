@@ -21,8 +21,6 @@ import subprocess
 import sys
 import time
 
-import numpy as np
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "common_functions"))
 
@@ -111,6 +109,7 @@ def _parse_layers(v):
 # --------------------------------------------------------------------------------------
 def load_data(task: str, cache_dir: str):
     """Notebook pipeline: MNIST -> (3,5) filter for binary -> /255 -> float32 -> deskew."""
+    import numpy as np
     os.makedirs(cache_dir, exist_ok=True)
     cache = os.path.join(cache_dir, f"mnist_deskew_{task}.npz")
     if os.path.exists(cache):
@@ -143,6 +142,7 @@ def load_data(task: str, cache_dir: str):
 # Model
 # --------------------------------------------------------------------------------------
 def build_model(cfg: dict, steps_per_epoch: int):
+    import numpy as np
     import tensorflow as tf
     from tensorflow_addons.optimizers import AdamW
 
@@ -219,6 +219,7 @@ def _git_commit():
 
 def _eval_sampled(model, X, y, batch_size):
     """Evaluate with ``training=True`` forward passes (finite-shot statistics)."""
+    import numpy as np
     import tensorflow as tf
 
     losses, correct, n = 0.0, 0, 0
@@ -232,8 +233,13 @@ def _eval_sampled(model, X, y, batch_size):
     return dict(loss=losses / n, acc=correct / n)
 
 
-def train(cfg: dict, on_epoch=None, log=print) -> dict:
+def _log(msg):
+    print(msg, flush=True)
+
+
+def train(cfg: dict, on_epoch=None, log=_log) -> dict:
     """Run one experiment; returns the result dict (also written to ``cfg['out']`` if set)."""
+    import numpy as np
     import tensorflow as tf
 
     if cfg.get("intra_threads"):
@@ -312,7 +318,9 @@ def train(cfg: dict, on_epoch=None, log=print) -> dict:
 
     test_loss, test_acc = model.evaluate(test_ds, verbose=0)
     probs = model.predict(test_ds, verbose=0)
-    preds = np.argmax(probs, -1).astype(int).tolist()
+    preds = np.argmax(probs, -1).astype(int)
+    test_errors = np.nonzero(preds != y_test.astype(int))[0].astype(int).tolist()
+    preds = preds.tolist()
     result = dict(
         cfg=cfg,
         git_commit=_git_commit(),
@@ -330,6 +338,7 @@ def train(cfg: dict, on_epoch=None, log=print) -> dict:
         total_wall_s=time.time() - t_start,
         ms_per_step=float(np.median([h["ms_per_step"] for h in history[1:]] or [history[0]["ms_per_step"]])),
         test_predictions=preds,
+        test_errors=test_errors,
     )
     if result["best_val"] is not None:
         va, nvl, ep = result["best_val"]
@@ -378,11 +387,13 @@ def build_parser():
 
 def main(argv=None):
     args = vars(build_parser().parse_args(argv))
-    overrides = dict(CONFIGS.get(args.pop("config") or "", {}))
+    config_name = args.pop("config")
+    overrides = dict(CONFIGS.get(config_name or "", {}))
     overrides.update({k: v for k, v in args.items() if v is not None})
     if overrides.get("ff_null") == "none":
         overrides["ff_null"] = None
     cfg = make_cfg(**overrides)
+    cfg["config"] = config_name
     if cfg["out"] is None:
         cfg["out"] = os.path.join(HERE, "runs", cfg["name"] + ".json")
     train(cfg)
