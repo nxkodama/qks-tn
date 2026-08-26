@@ -14,7 +14,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
 - [x] **A. Collect `lenet-v2-*`** (CIFAR done; MNIST-overlap 3/6) — overlapping receptive fields (CIFAR 11×11/s3, MNIST 9×9/s3/p1) and
   G=2 feature maps, configs L1/L4 × 3 seeds. Launched 21:34. Analyse vs `lenet-v1` (CIFAR L1 0.3906,
   L4 0.4552; MNIST L1 0.8809, L4 0.9759).
-- [~] **B. Collect `imagenet32-L5`** — 4 jobs, 15 epochs, dense encoder, 1000-way linear head.
+- [x] **B. Collect `imagenet32-L5`** (done) — 4 jobs, 15 epochs, dense encoder, 1000-way linear head.
   At epoch 7: val acc 0.55–0.75 % (chance 0.1 %). Analyse when done; expect the 16-outcome readout to
   be the binding constraint → motivates item D.
 - [x] **C. χ = 8 benchmark + MNIST/CIFAR sweeps.** χ = 8 is implemented (3 filters/register, 64-outcome
@@ -25,7 +25,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   **Benchmarked 22:00:** L40S 37 ms/step ($0.47/job), A100-40GB 50 ($0.68), T4 135 ($0.52) — as predicted
   the step is now compute-bound and the L40S wins on both speed and cost; use `--gpu L40S` for chi=8.
   Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched 22:02 on L40S.
-- [~] **D. χ = 8 on ImageNet-32** (launched 23:05: C0,C4 x seed 0, 7 epochs, L40S, ~$11) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
+- [x] **D. χ = 8 on ImageNet-32** (baseline done at 7 epochs; per-vertex-B arm still running) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
   epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
 - [x] **E. Two-stage (implemented, run, negative result) "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
   into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
@@ -130,3 +130,20 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   What would actually be needed: chi >= 32 (1024 outcomes), or K parallel trees whose readouts are
   concatenated, or a class-structured readout -- not more tree capacity. Recorded as the boundary of the
   approach rather than a result to chase.
+- 03:55 **ImageNet-32 complete (1 seed each, chance = 0.10 %):**
+
+  | model | epochs | test acc | x chance |
+  |---|---|---|---|
+  | chi=4 baseline shared | 15 | 0.0048 | 4.8 |
+  | chi=4 baseline per-vertex | 15 | 0.0054 | 5.4 |
+  | chi=4 **feedforward B** per-vertex | 15 | 0.0058 | 5.8 |
+  | chi=4 **feedforward B** shared | 15 | 0.0067 | 6.7 |
+  | chi=8 baseline shared | **7** | **0.0068** | 6.8 |
+
+  Two readable signals despite the tiny absolute numbers: **feedforward helps** (0.0067 vs 0.0048 for the
+  matched shared-unitary pair, +40 % relative) and **chi = 8 matches the best chi=4 model in half the
+  epochs**. But every model is within an order of magnitude of chance -- reading 1000 classes out of 16
+  (or 64) probabilities is the wrong shape of problem for this ansatz, and no amount of tree capacity
+  fixes it. The honest conclusion is a scope statement: **this architecture is a 10-class-scale method**;
+  scaling it to ImageNet needs a fundamentally wider readout (chi >= 32, parallel trees, or a structured
+  class code), which is a different piece of work.

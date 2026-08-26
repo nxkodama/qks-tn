@@ -153,6 +153,22 @@ maps**. Locality and feedforward, by contrast, keep compounding with chi (their 
 and +6.5 pp at chi = 4 to +15.1 and +8.2 pp at chi = 8). Best configuration found:
 **patch-local encoder + per-vertex multishot feedforward at chi = 8, G = 1 — CIFAR-10 0.5290 ± 0.0023.**
 
+### ImageNet-32 (1000 classes): the readout is the wall
+
+| model | epochs | test acc (chance 0.10 %) |
+|---|---|---|
+| chi=4 baseline shared | 15 | 0.48 % |
+| chi=4 baseline per-vertex | 15 | 0.54 % |
+| chi=4 feedforward B per-vertex | 15 | 0.58 % |
+| chi=4 feedforward B shared | 15 | 0.67 % |
+| chi=8 baseline shared | 7 | 0.68 % |
+
+Feedforward helps here too (+40 % relative on the matched pair) and chi = 8 matches the best chi = 4
+model in half the epochs — but everything sits within an order of magnitude of chance. Reading 1000
+classes out of 16 (or 64) root probabilities is the wrong shape of problem: **this ansatz is a
+10-class-scale method**, and scaling it needs a wider readout (chi ≥ 32, parallel trees, or a structured
+class code), not more tree capacity.
+
 ## Checkpointing and training for more epochs
 
 Every run writes a `tf.train.Checkpoint` (model weights, AdamW moments and the optimizer step counter that
