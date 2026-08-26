@@ -25,7 +25,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   **Benchmarked:** L40S 37 ms/step ($0.47/job), A100-40GB 50 ($0.68), T4 135 ($0.52) — as predicted
   the step is now compute-bound and the L40S wins on both speed and cost; use `--gpu L40S` for chi=8.
   Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched on L40S.
-- [x] **D. χ = 8 on ImageNet-32** (baseline done at 7 epochs; per-vertex-B arm still running) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
+- [x] **D. χ = 8 on ImageNet-32** (both arms done) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
   epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
 - [x] **E. Two-stage (implemented, run, negative result) "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
   into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
@@ -33,7 +33,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   C/D; helpers `fold_blocks`/`unfold_blocks` were specified but not written.
 - [x] **F. Ablations** (finite shots done; ff-layers/centred still unrun): finite shots (`C2s16/128/1024`), `--ff-layers 5` and `4,5`,
   centred features (`C2c`). Cheap (~15 min/job); run on MNIST if GPU capacity is idle.
-- [ ] **G. Housekeeping** — keep `FEEDFORWARD.md` current; final summary of the night at the end.
+- [x] **G. Housekeeping** — keep `FEEDFORWARD.md` current; final summary of the night at the end.
 
 ## Findings log (append; newest last)
 
@@ -151,3 +151,64 @@ times: the night's work began ~21:30 PDT 2026-08-25 and this correction was made
   fixes it. The honest conclusion is a scope statement: **this architecture is a 10-class-scale method**;
   scaling it to ImageNet needs a fundamentally wider readout (chi >= 32, parallel trees, or a structured
   class code), which is a different piece of work.
+- **[18]** **chi = 8 ImageNet-32, both arms (7 epochs, seed 0):** baseline shared 0.0068 (6.8x chance),
+  per-vertex feedforward B 0.0039 (3.9x). The feedforward arm is *worse* here -- 2.29 M TN parameters on
+  1.28 M images for 7 epochs is under-trained, not over-capacity (its training accuracy was still rising
+  at 0.0031). Nothing to conclude beyond the scope statement already recorded: ImageNet-32 is
+  readout-bound for this ansatz and is not a productive target without a much wider readout.
+
+---
+
+# FINAL SUMMARY OF THE NIGHT (written 00:25 PDT 2026-08-26)
+
+All queue items are closed. **210 result files** across the study; tonight's Modal spend is roughly
+**$30** (T4 for chi=4 work, L40S for chi=8), inside the $40 target.
+
+## What was built
+- **chi = 8 bond dimension** (`qks_tn_ff.py`): encoders generalised to k = log2(chi) filters per register
+  with a k-fold Kronecker product; `fixed_readout_matrix` generalises the paper's 0/1 readout to any
+  number of outcomes (and reproduces `ConstMul`/`ConstMulBinary` exactly at chi = 4, verified to 6e-8).
+- **Two-stage "deep kitchen sinks"** (`qks_tn_twostage.py`): fold 2x2 blocks into the batch, contract a
+  2-layer tree, re-encode the measured statistics with a second patch encoder and tree.
+- 24 unit tests across `tests/test_ff_equivalence.py` and `tests/test_lenet.py`, all passing.
+
+## The result that matters
+On CIFAR-10, three independent changes to the published model compound:
+
+| model | CIFAR-10 test acc |
+|---|---|
+| the paper's model (dense QKS, chi=4, shared unitaries) | 0.2862 +/- 0.0089 |
+| + patch-local encoder | 0.3906 +/- 0.0027 |
+| + multishot feedforward (mode B, per-vertex) | 0.4552 +/- 0.0042 |
+| + bond dimension chi = 8 | **0.5290 +/- 0.0023** |
+
+**+24.3 pp, 85 % relative**, every step positive on every seed. On MNIST the same stack reaches
+**0.9883 +/- 0.0003** (paper: 0.9673), and there the 150-parameter patch encoder *matches* the
+150,720-parameter dense one.
+
+## Ranking of the expressivity levers (all measured, 3 seeds each)
+1. **Bond dimension** chi 4 -> 8: +7.4 pp on the best CIFAR model; also subsumes feature maps.
+2. **Feedforward** (mode B): +6.5 pp at chi=4, +8.2 pp at chi=8 -- and the gain *grows* with chi.
+3. **Locality** (patch encoder): +10.5 pp at chi=4, +15.1 pp at chi=8.
+4. **Feature maps** G: +1.85 pp at G=2, +0.61 pp more at G=4, **+0.13 pp at chi=8** (redundant once
+   registers are wide).
+5. **Nulls**: receptive-field size, Morton vs raster leaf order, position-shared vs per-position filters,
+   trainable vs fixed readout (fixed is *better* by 8.5 pp), and the two-stage re-encoding (lands on the
+   single tree's accuracy-vs-parameters curve).
+
+## Practical findings
+- **Finite shots are cheap**: 128 shots/vertex is indistinguishable from exact statistics; 16 shots costs
+  0.24 pp. The obvious hardware objection to Case B does not bite.
+- **Hardware economics flip with chi**: at chi=4 the step is kernel-launch-bound and a T4 is cheapest;
+  at chi=8 it is compute-bound and an L40S is both fastest and cheapest (37 vs 135 ms/step, $0.47/job).
+- **ImageNet-32 is out of scope** for this ansatz: everything lands within an order of magnitude of
+  chance because 1000 classes are read out of 16-64 probabilities.
+- Two pipeline bugs were found and fixed (windowed shuffle on class-sorted data; cosine-schedule drift
+  from a ragged final batch), and per-epoch + per-annealing-cycle checkpointing was added.
+
+## Suggested next steps
+1. **chi = 16** on CIFAR (256 outcomes, ~65k params/unitary) -- the one lever that has not yet saturated.
+2. Longer training (63 epochs) of the best chi=8 configuration; at 15 epochs it was still improving.
+3. A wider readout for many-class problems (parallel trees concatenated, or a structured class code) if
+   ImageNet-scale is wanted at all.
+4. Unrun ablations: `--ff-layers` (root-only / top-two) and centred features at chi = 8.
