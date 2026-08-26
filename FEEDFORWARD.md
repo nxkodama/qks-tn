@@ -100,6 +100,10 @@ bit-compatible with the published code.
 | L1 patch-local, no feedforward | 0.3906 ± 0.0027 | 0.4466 ± 0.0029 |
 | **L4 patch-local + feedforward B** | 0.4552 ± 0.0042 | **0.5290 ± 0.0023** |
 
+On MNIST the same sweep gives C0 0.9747 ± 0.0011, C4 0.9874 ± 0.0003 and **L4 0.9883 ± 0.0003** (the
+best MNIST result here), and the patch model *matches* the dense one (+0.09 ± 0.03 pp, McNemar n.s.)
+with 150 encoder parameters against 150,720 — locality stops costing anything once the registers are wide.
+
 **Locality, feedforward and bond dimension compound**: 0.2862 → 0.5290 is +24.3 pp (85 % relative) over
 the published model, and the locality and feedforward gains are each *larger* at chi = 8 (+15.1 and
 +8.2 pp) than at chi = 4 (+10.5 and +6.5 pp) — a wider register gives the other two levers more to work

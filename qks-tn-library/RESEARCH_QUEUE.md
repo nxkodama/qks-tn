@@ -82,3 +82,10 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   both *larger* at chi = 8 than at chi = 4 (+10.5 and +6.5 pp), i.e. a wider register lets the other two
   levers express more. Cost 36 ms/step on an L40S (~$0.47 per 15-epoch job).
   Launched chi=8 x G=2 (the two winners combined) on CIFAR, L4, 3 seeds.
+- 00:15 **chi = 8 on MNIST (3 seeds, 15 epochs):** C0 0.9747 +/- 0.0011, L1 0.9386 +/- 0.0019,
+  C4 0.9874 +/- 0.0003, **L4 0.9883 +/- 0.0003** -- the best MNIST number of the whole study (chi=4 was
+  0.9820 dense / 0.9759 patch at 15 epochs, 0.9859 at 63 epochs). Two notes:
+  (i) at chi = 8 the patch model *matches* the dense one on MNIST (L4-C4 = +0.09 +/- 0.03 pp, McNemar
+  n.s. on all seeds) with **150 encoder parameters vs 150,720** -- locality stops being a handicap once
+  the registers are wide enough; (ii) feedforward is still worth +4.97 +/- 0.20 pp with the patch encoder.
+  MNIST is now clearly saturating (98.8 %), so CIFAR-10 and ImageNet-32 are the discriminating tasks.
