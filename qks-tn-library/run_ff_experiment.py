@@ -62,7 +62,7 @@ DEFAULTS = dict(
     sigma=0.125,  # QKS weight std for 784-dim inputs; scaled by sqrt(784/p) for other input sizes
     head="auto",  # const (paper's fixed 0/1 readout, <=10 classes) | linear (trainable logits) | auto
     # LeNet-style encoder (qks_tn_lenet.PatchQKSEncodingLayer); leaves = positions x groups
-    encoder="dense",  # dense (paper's QKS) | patch (local, position-shared filters)
+    encoder="dense",  # dense (paper's QKS) | patch (local filters) | twostage (patch -> tree -> re-encode -> tree)
     patch=None,  # receptive field (default per image size: 7 for 28x28, 4 for 32x32)
     stride=None,  # default 3 for 28x28, 4 for 32x32 -> 8x8 positions
     pad=None,  # symmetric zero padding (default 0)
@@ -106,6 +106,9 @@ CONFIGS = {
     # ... and locally connected filters (same receptive fields, no weight sharing)
     "U1": dict(encoder="patch", leaf_order="morton", share_positions=False, mode="baseline", share_per_layer=False),
     "U4": dict(encoder="patch", leaf_order="morton", share_positions=False, mode="B", share_per_layer=False),
+    # two-stage "deep kitchen sinks": conv -> pool -> re-encode measured statistics -> conv -> pool
+    "T1": dict(encoder="twostage", mode="baseline", share_per_layer=False),
+    "T4": dict(encoder="twostage", mode="B", share_per_layer=False),
     # trainable-logits head variants (the paper's fixed readout is the default)
     "L4lin": dict(encoder="patch", leaf_order="morton", mode="B", share_per_layer=False, head="linear"),
     "C4lin": dict(mode="B", share_per_layer=False, head="linear"),
@@ -129,7 +132,9 @@ def make_cfg(**overrides) -> dict:
             parts.append("frozenqks")
         if cfg["impl"] != "new":
             parts.append(cfg["impl"])
-        if cfg["encoder"] == "patch":
+        if cfg["encoder"] in ("patch", "twostage"):
+            if cfg["encoder"] == "twostage":
+                parts.append("twostage")
             geo = patch_geometry(cfg)
             parts.append(f"patch{geo['patch']}s{geo['stride']}" + (f"p{geo['pad']}" if geo["pad"] else ""))
             parts.append(f"g{cfg['groups']}")
@@ -308,6 +313,48 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         head_kind = "const" if n_classes <= 10 else "linear"
     tf.keras.utils.set_random_seed(int(cfg["seed"]))
     encoder_info = {}
+    if cfg.get("encoder", "dense") == "twostage":
+        import qks_tn_twostage as ts
+
+        H, W, C = IMAGE_SHAPES[cfg["task"]]
+        if p != H * W * C:
+            raise ValueError(f"input dim {p} != {H}x{W}x{C}")
+        geo = patch_geometry(cfg)
+        sigma = float(cfg["sigma"]) * float(np.sqrt(784.0 / (geo["patch"] ** 2 * C))) * float(cfg["sigma_scale"])
+        stage = ts.TwoStageQKSTTN(
+            (H, W, C), sigma=sigma, chi=int(cfg["chi"]), groups=int(cfg["groups"]),
+            mode=cfg["mode"], share_per_layer=cfg["share_per_layer"], seed=int(cfg["seed"]), **geo,
+        )
+        qks, tn_layer = stage.enc1, stage.tn2
+        nlayers = stage.enc2.nlayers
+        encoder_info = dict(encoder="twostage", blocks=stage.n_blocks, stage2_grid=list(stage.enc2.grid),
+                            leaves=stage.enc1.n_leaves, **geo, groups=int(cfg["groups"]))
+        n_outcomes = int(cfg["chi"]) ** 2
+        if head_kind == "const":
+            head = ff.ConstMulFixed(n_outcomes, n_classes)
+            loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
+        else:
+            head = tf.keras.layers.Dense(n_classes, name="linear_head")
+            loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        model = tf.keras.Sequential([tf.keras.layers.InputLayer(input_shape=(p,)), stage, head])
+        if cfg["freeze_qks"]:
+            stage.enc1.trainable = False
+            stage.enc2.trainable = False
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["lr"], steps_per_epoch)
+        wd_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["wd"], steps_per_epoch)
+        model.compile(loss=loss, optimizer=AdamW(learning_rate=lr_schedule, weight_decay=wd_schedule), metrics=["accuracy"])
+        counts = dict(
+            total=int(model.count_params()),
+            qks=int(stage.enc1.count_params() + stage.enc2.count_params()),
+            tn=int(stage.tn1.count_params() + stage.tn2.count_params()),
+            tn_effective=int(stage.tn1.count_params() + stage.tn2.count_params()),
+            head=int(head.count_params()),
+            trainable=int(sum(int(np.prod(v.shape)) for v in model.trainable_variables)),
+            input_dim=int(p), n_classes=int(n_classes), sigma=float(sigma), head_kind=head_kind,
+            chi=int(cfg["chi"]), n_outcomes=n_outcomes, nlayers=int(nlayers), **encoder_info,
+        )
+        return model, qks, tn_layer, counts
+
     if cfg.get("encoder", "dense") == "patch":
         import qks_tn_lenet as ln
 
@@ -645,7 +692,7 @@ def build_parser():
     ap.add_argument("--no-share-per-layer", dest="share_per_layer", action="store_false")
     ap.add_argument("--seed", type=int)
     ap.add_argument("--nepisodes", type=int, help="QKS episodes = tree leaves x 2; 128 -> 6 layers, 256 -> 7, 512 -> 8")
-    ap.add_argument("--encoder", choices=["dense", "patch"])
+    ap.add_argument("--encoder", choices=["dense", "patch", "twostage"])
     ap.add_argument("--patch", type=int)
     ap.add_argument("--stride", type=int)
     ap.add_argument("--pad", type=int)

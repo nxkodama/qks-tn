@@ -49,6 +49,8 @@ COMPARISONS = [
     ("L4", "U4", "position-shared filters vs locally connected (weight sharing)"),
     ("U4", "C4", "local unshared filters vs dense: locality alone"),
     ("L4", "L1", "feedforward B vs baseline with the patch encoder"),
+    ("T4", "L4", "two-stage (re-encoded statistics) vs single-tree LeNet-style"),
+    ("T4", "T1", "feedforward B vs baseline in the two-stage model"),
     ("L2", "L0", "shared B vs shared baseline with the patch encoder"),
     ("R4", "R1", "feedforward B vs baseline, raster order"),
     ("L4lin", "L4", "trainable linear head vs the paper's fixed readout"),
@@ -63,7 +65,7 @@ PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4
 SLOT = {"C0": 0, "C1": 1, "C2": 2, "C3": 3, "C4": 4, "C5": 5, "C6": 7, "C0old": 6, "C2c": 7}
 SLOT.update({"F0": SLOT["C0"], "F2": SLOT["C2"], "F5": SLOT["C5"]})
 SLOT.update({"C2s16": 2, "C2s128": 2, "C2s1024": 2, "C2root": 2, "C2top2": 2})
-SLOT.update({"L0": 0, "L1": 1, "L2": 2, "L4": 4, "R1": 3, "R4": 5, "U1": 6, "U4": 7, "L4lin": 3, "C4lin": 3})
+SLOT.update({"T1": 6, "T4": 7, "L0": 0, "L1": 1, "L2": 2, "L4": 4, "R1": 3, "R4": 5, "U1": 6, "U4": 7, "L4lin": 3, "C4lin": 3})
 LABEL = {
     "C0": "baseline (shared)",
     "C1": "baseline (per-vertex)",
@@ -90,6 +92,8 @@ LABEL = {
     "R4": "patch, raster, B (per-vertex)",
     "U1": "local unshared, baseline (per-vertex)",
     "U4": "local unshared, B (per-vertex)",
+    "T1": "two-stage, baseline (per-vertex)",
+    "T4": "two-stage, B (per-vertex)",
     "L4lin": "patch, Morton, B (per-vertex), linear head",
     "C4lin": "dense, B (per-vertex), linear head",
 }
@@ -301,10 +305,11 @@ def main(argv=None):
         ("trainable QKS", ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C0old"]),
         ("frozen QKS", ["F0", "F2", "F5"]),
         ("patch encoder", ["L0", "L1", "L2", "L4", "R1", "R4", "U1", "U4", "L4lin"]),
+        ("two-stage", ["L1", "L4", "T1", "T4"]),
         ("ablations", ["C2", "C2c", "C2s16", "C2s128", "C2s1024", "C2root", "C2top2"]),
     ]:
         present = [c for c in confs if c in groups]
-        if facet in ("ablations", "patch encoder") and len(present) < 1:
+        if facet in ("ablations", "patch encoder", "two-stage") and len(present) < 1:
             continue
         p = plot_curves(groups, prefix + "_curves", facet, confs)
         if p:
