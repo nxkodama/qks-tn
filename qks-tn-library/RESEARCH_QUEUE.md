@@ -213,6 +213,15 @@ On CIFAR-10, three independent changes to the published model compound:
 - Two pipeline bugs were found and fixed (windowed shuffle on class-sorted data; cosine-schedule drift
   from a ragged final batch), and per-epoch + per-annealing-cycle checkpointing was added.
 
+## Deliverables
+- `FEEDFORWARD.md` -- the full write-up (all sweeps, tables, curves, negative results).
+- `img/study_summary.png` -- one figure covering every configuration at the common 15-epoch protocol
+  (built by `qks-tn-library/make_summary_figure.py`; three bookkeeping bugs were found and fixed while
+  building it: frozen-QKS runs were being pooled with trainable ones, two receptive-field geometries
+  were averaged together, and `build_model` recorded `leaves = nepisodes // 2` which is wrong for
+  chi != 4).
+- `qks-tn-library/results/<sweep>/` -- per-epoch histories, per-cycle checkpoints, summaries.
+
 ## Suggested next steps
 1. **chi = 16** -- unblocked tonight (scatter Hermitian) and confirmed still improving: the shared-unitary
    baseline goes 0.3277 (chi=4) -> 0.4240 (chi=16) on CIFAR. Worth a proper 3-seed sweep, and chi=32 needs

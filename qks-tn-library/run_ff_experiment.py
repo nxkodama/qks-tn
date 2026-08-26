@@ -381,7 +381,7 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
             qks = ff.FastFeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
         else:
             qks = ff.FeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
-        encoder_info = dict(encoder="dense", leaves=cfg["nepisodes"] // 2)
+        encoder_info = dict(encoder="dense", leaves=int(cfg["nepisodes"] // np.log2(cfg["chi"])))
 
     if cfg["impl"] == "old":
         if cfg["mode"] != "baseline":

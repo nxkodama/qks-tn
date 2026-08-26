@@ -12,6 +12,12 @@ Design note: *Feedforward measurement in QKS+TTN: single-shot vs multishot* (Not
 | linear in the input state | yes → exact tensor network | no → one forced bottom-up sweep |
 | expressivity vs. baseline | none (block-diagonal widening of the parent) | genuinely nonlinear |
 
+![what each architectural change is worth](img/study_summary.png)
+
+*Every configuration at the same 15-epoch protocol with the paper's fixed readout, 3 seeds each. The
+published model is the top bar of each panel; colour is bond dimension. Regenerate with
+`.venv/bin/python qks-tn-library/make_summary_figure.py`.*
+
 ## Code
 
 Everything lives in `qks-tn-library/`; the original notebooks and `common_functions/qks_tn.py` are untouched.
