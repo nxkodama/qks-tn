@@ -61,7 +61,7 @@ DEFAULTS = dict(
     chi=4,
     sigma=0.125,  # QKS weight std for 784-dim inputs; scaled by sqrt(784/p) for other input sizes
     head="auto",  # const (paper's fixed 0/1 readout, <=10 classes) | linear (trainable logits) | auto
-    shuffle_buffer=250_000,  # cap on the shuffle buffer (full shuffle below this size)
+    shuffle_buffer=None,  # index-shuffle buffer; None = full permutation every epoch (indices only, cheap)
     lr=1e-3,
     wd=4e-4,
 )
@@ -209,11 +209,13 @@ def load_data(task: str, cache_dir: str, log=print):
     return X_train, y_train, X_test, y_test
 
 
-def make_dataset(X, y, batch_size: int, shuffle: bool, seed: int, shuffle_buffer: int = 250_000):
+def make_dataset(X, y, batch_size: int, shuffle: bool, seed: int, shuffle_buffer=None):
     """tf.data pipeline backed by a CPU tf.Variable (sidesteps the 2 GB graph-constant limit).
 
-    Indices are shuffled (full shuffle up to ``shuffle_buffer`` examples) and batches gathered
-    from the variable; uint8 images are scaled to [0, 1] on the fly.
+    Indices are shuffled -- by default a *full* permutation every epoch (the buffer holds int64
+    indices, so this is cheap even for 1.28M rows; a windowed shuffle would be catastrophic on
+    class-sorted datasets such as the HF ImageNet-32 train split) -- and batches are gathered from
+    the variable; uint8 images are scaled to [0, 1] on the fly.
     """
     import numpy as np
     import tensorflow as tf
@@ -232,7 +234,8 @@ def make_dataset(X, y, batch_size: int, shuffle: bool, seed: int, shuffle_buffer
 
     ds = tf.data.Dataset.range(n)
     if shuffle:
-        ds = ds.shuffle(min(n, shuffle_buffer), seed=seed, reshuffle_each_iteration=True)
+        buf = n if not shuffle_buffer else min(n, int(shuffle_buffer))
+        ds = ds.shuffle(buf, seed=seed, reshuffle_each_iteration=True)
     return ds.batch(batch_size).map(fetch, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
 
 
@@ -379,7 +382,8 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
     log(f"[{cfg['name']}] devices={devices} params={counts} steps/epoch={steps_per_epoch} n_train={len(y_train)} n_test={len(y_test)}")
 
     tf.keras.utils.set_random_seed(int(cfg["seed"]))
-    train_ds = make_dataset(X_train, y_train, bs, shuffle=True, seed=int(cfg["seed"]), shuffle_buffer=int(cfg.get("shuffle_buffer", 250_000)))
+    train_ds = make_dataset(X_train, y_train, bs, shuffle=True, seed=int(cfg["seed"]), shuffle_buffer=cfg.get("shuffle_buffer"))
+    log(f"[{cfg['name']}] shuffle buffer = {cfg.get('shuffle_buffer') or len(y_train)} of {len(y_train)} (full permutation)" if not cfg.get("shuffle_buffer") else f"[{cfg['name']}] shuffle buffer = {cfg['shuffle_buffer']} of {len(y_train)} (WINDOWED)")
     test_ds = make_dataset(X_test, y_test, bs, shuffle=False, seed=int(cfg["seed"]))
 
     history = []
