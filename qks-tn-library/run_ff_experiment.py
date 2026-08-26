@@ -69,6 +69,7 @@ CONFIGS = {
     "C3": dict(mode="B", share_per_layer=True, ff_null="constant"),
     "C4": dict(mode="B", share_per_layer=False),
     "C5": dict(mode="A", share_per_layer=True),
+    "C6": dict(mode="A", share_per_layer=False),
     "F0": dict(mode="baseline", share_per_layer=True, freeze_qks=True),
     "F2": dict(mode="B", share_per_layer=True, freeze_qks=True),
     "F5": dict(mode="A", share_per_layer=True, freeze_qks=True),
@@ -100,6 +101,8 @@ def make_cfg(**overrides) -> dict:
             parts.append("frozenqks")
         if cfg["impl"] != "new":
             parts.append(cfg["impl"])
+        if int(cfg["nepisodes"]) != 128:
+            parts.append(f"n{cfg['nepisodes']}")  # 128 episodes = 6 tree layers, 256 = 7, 512 = 8
         parts.append(f"s{cfg['seed']}")
         cfg["name"] = "_".join(parts)
     return cfg
@@ -409,6 +412,7 @@ def build_parser():
     ap.add_argument("--share-per-layer", dest="share_per_layer", action="store_true", default=None)
     ap.add_argument("--no-share-per-layer", dest="share_per_layer", action="store_false")
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--nepisodes", type=int, help="QKS episodes = tree leaves x 2; 128 -> 6 layers, 256 -> 7, 512 -> 8")
     ap.add_argument("--ff-layers", dest="ff_layers", help="comma-separated layers receiving feedforward, e.g. 4,5")
     ap.add_argument("--ff-features", dest="ff_features", choices=["raw", "centered"])
     ap.add_argument("--ff-null", dest="ff_null", choices=["none", "constant", "shuffle"])

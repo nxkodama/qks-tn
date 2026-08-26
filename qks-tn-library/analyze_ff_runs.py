@@ -40,6 +40,8 @@ COMPARISONS = [
     ("C4", "C1", "per-vertex B vs per-vertex baseline"),
     ("C5", "C0", "single-shot feedforward (A) vs baseline"),
     ("C5", "C1", "A vs parameter-matched per-vertex baseline"),
+    ("C6", "C1", "per-vertex A vs per-vertex baseline"),
+    ("C6", "C4", "per-vertex A vs per-vertex B"),
     ("F2", "F0", "B vs baseline with frozen QKS (TN-only learning)"),
     ("F5", "F0", "A vs baseline with frozen QKS (TN-only learning)"),
     ("C0", "C0old", "new sweep vs original TNLayer implementation (regression)"),
@@ -48,7 +50,7 @@ COMPARISONS = [
 # Fixed categorical slot per *model type* (colour follows the entity, never the rank).
 # Palette: dataviz reference categorical order (light surface).
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
-SLOT = {"C0": 0, "C1": 1, "C2": 2, "C3": 3, "C4": 4, "C5": 5, "C0old": 6, "C2c": 7}
+SLOT = {"C0": 0, "C1": 1, "C2": 2, "C3": 3, "C4": 4, "C5": 5, "C6": 7, "C0old": 6, "C2c": 7}
 SLOT.update({"F0": SLOT["C0"], "F2": SLOT["C2"], "F5": SLOT["C5"]})
 SLOT.update({"C2s16": 2, "C2s128": 2, "C2s1024": 2, "C2root": 2, "C2top2": 2})
 LABEL = {
@@ -58,6 +60,7 @@ LABEL = {
     "C3": "B, constant p (null)",
     "C4": "B (per-vertex)",
     "C5": "A: single-shot feedforward",
+    "C6": "A (per-vertex)",
     "C0old": "baseline, original TNLayer",
     "F0": "baseline (shared)",
     "F2": "B: multishot feedforward",
@@ -265,7 +268,7 @@ def main(argv=None):
     prefix = os.path.join(d, f"{tag}")
     figs = []
     for facet, confs in [
-        ("trainable QKS", ["C0", "C1", "C2", "C3", "C4", "C5", "C0old"]),
+        ("trainable QKS", ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C0old"]),
         ("frozen QKS", ["F0", "F2", "F5"]),
         ("ablations", ["C2", "C2c", "C2s16", "C2s128", "C2s1024", "C2root", "C2top2"]),
     ]:

@@ -56,7 +56,7 @@ data_vol = modal.Volume.from_name("qks-tn-data", create_if_missing=True)
     gpu=GPU_SPEC,
     cpu=4 if GPU_SPEC is None else 2,
     memory=8192,
-    timeout=4 * 60 * 60,
+    timeout=8 * 60 * 60,
     volumes={"/out": results_vol, "/data": data_vol},
 )
 def train_job(cfg: dict, sweep: str) -> dict:
@@ -102,8 +102,10 @@ def main(
     sweep: str = "ff-v1",
     limit_train: int = 0,
     fresh: bool = False,
+    nepisodes: int = 128,
 ):
-    """``fresh=True`` ignores existing checkpoints on the Volume and retrains from scratch."""
+    """``fresh=True`` ignores existing checkpoints on the Volume and retrains from scratch.
+    ``nepisodes`` sets the tree depth (128 -> 6 layers, 256 -> 7, 512 -> 8)."""
     sys.path.insert(0, HERE)
     import run_ff_experiment as rfe
 
@@ -111,14 +113,14 @@ def main(
     for c in [x.strip() for x in configs.split(",") if x.strip()]:
         for s in [int(x) for x in seeds.split(",") if x.strip()]:
             ov = dict(rfe.CONFIGS[c])
-            ov.update(task=task, seed=s, epochs=epochs)
+            ov.update(task=task, seed=s, epochs=epochs, nepisodes=int(nepisodes))
             if limit_train:
                 ov["limit_train"] = int(limit_train)
             cfg = rfe.make_cfg(**ov)
             cfg["config"] = c
             cfg["resume"] = not fresh
             cfgs.append(cfg)
-    print(f"spawning {len(cfgs)} jobs on {GPU} (sweep={sweep}, task={task}, epochs={epochs})")
+    print(f"spawning {len(cfgs)} jobs on {GPU} (sweep={sweep}, task={task}, epochs={epochs}, nepisodes={nepisodes})")
     handles = [train_job.spawn(cfg, sweep) for cfg in cfgs]
 
     out_dir = Path(HERE) / "results" / sweep
