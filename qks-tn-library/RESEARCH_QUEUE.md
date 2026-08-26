@@ -123,3 +123,10 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   16 shots 0.9712 +/- 0.0004**. 128 shots per vertex is indistinguishable from exact and even 16 shots
   costs only 0.24 pp. The multishot feedforward does not need deep statistics to work, which is the
   practical objection one would raise against Case B on real hardware.
+- 03:10 **ImageNet-32, chi = 8 vs chi = 4 (baselines, seed 0):** chi=8 reaches **0.68 % test acc in 7
+  epochs** vs chi=4's 0.48 % in 15 (chance 0.10 %), i.e. the 64-outcome readout is worth ~+40 % relative
+  in less than half the training. The direction confirms the readout diagnosis, but 6.8x chance is still
+  useless in absolute terms: a 1000-class problem read out through 64 numbers is the wrong shape.
+  What would actually be needed: chi >= 32 (1024 outcomes), or K parallel trees whose readouts are
+  concatenated, or a class-structured readout -- not more tree capacity. Recorded as the boundary of the
+  approach rather than a result to chase.
