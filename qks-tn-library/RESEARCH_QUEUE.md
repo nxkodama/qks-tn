@@ -1,0 +1,40 @@
+# Overnight research queue (started 2026-08-25 ~21:45 PDT, 8 h budget)
+
+Durable agenda for the autonomous loop. Each wake-up: (1) collect finished sweeps and analyse them,
+(2) record findings here + in `FEEDFORWARD.md`, (3) start the next unstarted item, (4) commit.
+Modal jobs are launched with `--detach` so they survive client/network drops.
+
+Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; keep the night under ~$40.
+
+## Status legend
+`[ ]` not started `[~]` running `[x]` done (result recorded) `[-]` dropped (with reason)
+
+## Queue
+
+- [~] **A. Collect `lenet-v2-*`** — overlapping receptive fields (CIFAR 11×11/s3, MNIST 9×9/s3/p1) and
+  G=2 feature maps, configs L1/L4 × 3 seeds. Launched 21:34. Analyse vs `lenet-v1` (CIFAR L1 0.3906,
+  L4 0.4552; MNIST L1 0.8809, L4 0.9759).
+- [~] **B. Collect `imagenet32-L5`** — 4 jobs, 15 epochs, dense encoder, 1000-way linear head.
+  At epoch 7: val acc 0.55–0.75 % (chance 0.1 %). Analyse when done; expect the 16-outcome readout to
+  be the binding constraint → motivates item D.
+- [ ] **C. χ = 8 benchmark + MNIST/CIFAR sweeps.** χ = 8 is implemented (3 filters/register, 64-outcome
+  readout, 2.29 M TN params for per-vertex B). First benchmark ms/step on T4 / L40S / A100-40GB with
+  `--configs L4 --chi 8 --limit-train 9600 --epochs 2` (the step should become compute-bound, so the
+  bigger GPUs may finally win on cost). Then 15-epoch sweeps `chi8-mnist`, `chi8-cifar` with
+  configs L1,L4 (+ dense C0,C4 for the paper-model comparison), 3 seeds, on the cheapest GPU per step.
+- [ ] **D. χ = 8 on ImageNet-32** — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
+  epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
+- [ ] **E. Two-stage "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
+  into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
+  with a second patch-QKS on the 4×4×16 field, second tree, head. Implement only if time remains after
+  C/D; helpers `fold_blocks`/`unfold_blocks` were specified but not written.
+- [ ] **F. Ablations still unrun from ff-v1**: finite shots (`C2s16/128/1024`), `--ff-layers 5` and `4,5`,
+  centred features (`C2c`). Cheap (~15 min/job); run on MNIST if GPU capacity is idle.
+- [ ] **G. Housekeeping** — keep `FEEDFORWARD.md` current; final summary of the night at the end.
+
+## Findings log (append; newest last)
+
+- 21:45 χ = 8 implemented and tested (24/24 tests pass). χ = 4 remains bit-compatible: dense encoder
+  matches the original `FeatureEncodingLayer` to 6e−8, and `fixed_readout_matrix(16,10)/(16,2)`
+  reproduce `ConstMul`/`ConstMulBinary` exactly. χ = 8 dense encoder needs 192 episodes for 64 leaves;
+  patch encoder uses 3 filters per register (147 params on CIFAR 4×4×3).

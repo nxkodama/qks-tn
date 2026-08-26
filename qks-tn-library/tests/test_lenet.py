@@ -183,6 +183,58 @@ def test_i_config_names_are_distinct():
     assert "patch7s3_g2_morton" in rfe.make_cfg(**dict(rfe.CONFIGS["L4"], task="multiclass", seed=0, groups=2))["name"]
 
 
+def test_j_chi8_generalisation():
+    """chi = 8: 3 filters per register, 64-outcome readout; chi = 4 stays bit-compatible."""
+    import qks_tn as legacy
+
+    tf.keras.utils.set_random_seed(0)
+    X = tf.random.uniform((4, 784))
+    # chi = 4 backwards compatibility
+    tf.keras.utils.set_random_seed(0)
+    ref = legacy.FeatureEncodingLayer(128, 4, 784, 0.125)
+    tf.keras.utils.set_random_seed(0)
+    new = ff.FastFeatureEncodingLayer(128, 4, 784, 0.125)
+    assert _maxabs(ref.call(X).numpy(), new(X).numpy()) < 1e-6
+    assert np.array_equal(ff.fixed_readout_matrix(16, 10), legacy.ConstMul().const)
+    assert np.array_equal(ff.fixed_readout_matrix(16, 2), legacy.ConstMulBinary().const)
+    # chi = 8 dense encoder: 3 angles per register, unit-trace registers
+    enc = ff.FastFeatureEncodingLayer(192, 8, 784, 0.125)
+    rho = enc(X)
+    assert rho.shape == (4, 8, 8, 64)
+    tr = np.trace(rho.numpy(), axis1=1, axis2=2)
+    assert np.max(np.abs(tr - 1)) < 1e-5
+    # tree + readout
+    for mode in ("baseline", "B"):
+        tn8 = ff.FeedforwardTNLayer(8, 6, mode=mode, share_per_layer=False, seed=0)
+        out = tn8(rho).numpy()
+        assert out.shape == (4, 64) and np.max(np.abs(out.sum(-1) - 1)) < 1e-5 and out.min() > -1e-6
+    assert ff.FeedforwardTNLayer(8, 6, mode="baseline", share_per_layer=False).count_params() == 63 * 4095
+    # zero-coupling mode B reduces to the baseline at chi = 8 too
+    p0 = ff.random_hermitian_params(64, 6, np.random.default_rng(0))
+    b8 = ff.FeedforwardTNLayer(8, 6, mode="baseline", init_params0=p0)
+    m8 = ff.FeedforwardTNLayer(8, 6, mode="B", init_params0=p0)
+    assert _maxabs(b8(rho).numpy(), m8(rho).numpy()) < 1e-5
+    # chi = 8 patch encoder and the generalised head
+    pe = ln.PatchQKSEncodingLayer((32, 32, 3), 4, 4, 0.5, bond_dim=8)
+    assert pe(tf.random.uniform((4, 3072))).shape == (4, 8, 8, 64)
+    assert pe.count_params() == 4 * 4 * 3 * 3 + 3  # 3 filters per register
+    head = ff.ConstMulFixed(64, 10)
+    assert head.const.shape == (10, 64) and head.const.numpy().sum() == 64
+
+
+def test_k_chi8_model_builds_and_trains():
+    rng = np.random.default_rng(0)
+    X = rng.uniform(size=(8, 3072)).astype("float32")
+    y = (np.arange(8) % 10).astype("float32")
+    for name in ("L1", "L4"):
+        cfg = rfe.make_cfg(**dict(rfe.CONFIGS[name], task="cifar10", seed=0, chi=8))
+        assert "chi8" in cfg["name"]
+        model, qks, tn, counts = rfe.build_model(cfg, steps_per_epoch=2, p=3072, n_classes=10)
+        assert counts["chi"] == 8 and counts["n_outcomes"] == 64 and counts["leaves"] == 64
+        h = model.fit(X, y, batch_size=4, epochs=1, verbose=0)
+        assert np.all(np.isfinite(h.history["loss"]))
+
+
 # ---------------------------------------------------------------------------------------
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

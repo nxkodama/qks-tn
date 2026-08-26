@@ -140,6 +140,8 @@ def make_cfg(**overrides) -> dict:
                 parts.append(f"sig{cfg['sigma_scale']}")
         elif int(cfg["nepisodes"]) != 128:
             parts.append(f"n{cfg['nepisodes']}")  # 128 episodes = 6 tree layers, 256 = 7, 512 = 8
+        if int(cfg["chi"]) != 4:
+            parts.append(f"chi{cfg['chi']}")
         if cfg.get("head") not in (None, "auto"):
             parts.append(f"head-{cfg['head']}")
         parts.append(f"s{cfg['seed']}")
@@ -320,6 +322,7 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
             groups=int(cfg["groups"]),
             share_positions=bool(cfg["share_positions"]),
             leaf_order=cfg["leaf_order"],
+            bond_dim=int(cfg["chi"]),
             **geo,
         )
         nlayers = qks.nlayers
@@ -362,13 +365,9 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         )
         tn_effective = None
 
+    n_outcomes = int(cfg["chi"]) ** 2
     if head_kind == "const":
-        if n_classes == 2:
-            head = ff.ConstMulBinary()
-        elif n_classes == 10:
-            head = ff.ConstMul()
-        else:
-            raise ValueError("the fixed readout supports 2 or 10 classes; use head='linear'")
+        head = ff.ConstMulFixed(n_outcomes, n_classes)
         loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
     else:
         # trainable logits from the 16 readout probabilities (needed when classes > 16)
@@ -396,6 +395,8 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         n_classes=int(n_classes),
         sigma=float(sigma),
         head_kind=head_kind,
+        chi=int(cfg["chi"]),
+        n_outcomes=n_outcomes,
         nlayers=int(nlayers),
         **encoder_info,
     )
@@ -649,6 +650,7 @@ def build_parser():
     ap.add_argument("--stride", type=int)
     ap.add_argument("--pad", type=int)
     ap.add_argument("--groups", type=int)
+    ap.add_argument("--chi", type=int, help="register (bond) dimension, a power of two; 4 = 2 qubits, 8 = 3")
     ap.add_argument("--leaf-order", dest="leaf_order", choices=["morton", "raster"])
     ap.add_argument("--no-share-positions", dest="share_positions", action="store_false", default=None)
     ap.add_argument("--sigma-scale", dest="sigma_scale", type=float)

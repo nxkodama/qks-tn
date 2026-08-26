@@ -28,6 +28,8 @@ from __future__ import annotations
 import numpy as np
 import tensorflow as tf
 
+from qks_tn_ff import angles_to_registers  # generic chi = 2**k
+
 __all__ = [
     "IMAGE_SHAPES",
     "PATCH_DEFAULTS",
@@ -94,27 +96,6 @@ def morton_leaf_order(grid_h: int, grid_w: int, groups: int = 1, order: str = "m
 
 
 # --------------------------------------------------------------------------------------
-# angles -> chi=4 registers (identical maths to FastFeatureEncodingLayer)
-# --------------------------------------------------------------------------------------
-def angles_to_registers(theta: tf.Tensor) -> tf.Tensor:
-    """``theta`` (B, L, 2) real -> (B, 4, 4, L) complex64 leaf density matrices.
-
-    ``theta[..., 0]`` is the first (high) qubit of each register, ``theta[..., 1]`` the
-    second -- the same pairing as consecutive episodes in the dense encoder.
-    """
-    zero = tf.zeros_like(theta)
-    r00 = tf.complex(tf.math.cos(theta / 2) ** 2, zero)
-    r01 = tf.complex(zero, tf.math.sin(theta) / 2)
-    r11 = tf.complex(tf.math.sin(theta / 2) ** 2, zero)
-    rho1 = tf.stack([tf.stack([r00, r01], axis=-1), tf.stack([-r01, r11], axis=-1)], axis=-2)  # (B, L, 2, 2, 2)
-    a, b = rho1[:, :, 0], rho1[:, :, 1]
-    L = theta.shape[1]
-    rho2 = tf.einsum("nkab,nkcd->nkacbd", a, b)  # kron(a, b)
-    rho2 = tf.reshape(rho2, [-1, L, 4, 4])
-    return tf.transpose(rho2, [0, 2, 3, 1])
-
-
-# --------------------------------------------------------------------------------------
 # The encoder
 # --------------------------------------------------------------------------------------
 class PatchQKSEncodingLayer(tf.keras.layers.Layer):
@@ -143,13 +124,14 @@ class PatchQKSEncodingLayer(tf.keras.layers.Layer):
         pad: int = 0,
         share_positions: bool = True,
         leaf_order: str = "morton",
-        filters_per_register: int = 2,
         bond_dim: int = 4,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        if filters_per_register != 2 or bond_dim != 4:
-            raise NotImplementedError("only chi=4 registers built from 2 filters are supported")
+        k = int(np.log2(bond_dim))
+        if 2**k != bond_dim or k < 1:
+            raise ValueError(f"bond_dim must be a power of two, got {bond_dim}")
+        self.chi, self.qubits = int(bond_dim), k
         H, W, C = (int(v) for v in image_shape)
         if (H + 2 * pad - patch) % stride or (W + 2 * pad - patch) % stride:
             raise ValueError(f"patch {patch}/stride {stride}/pad {pad} does not tile a {H}x{W} image exactly")
@@ -165,7 +147,7 @@ class PatchQKSEncodingLayer(tf.keras.layers.Layer):
         perm = morton_leaf_order(self.grid[0], self.grid[1], self.groups, leaf_order)
         self.perm = tf.constant(perm, dtype=tf.int64)
         self.nlayers = int(np.log2(self.n_leaves))
-        n_out = 2 * self.groups
+        n_out = self.qubits * self.groups  # log2(chi) filters per register
         if self.share_positions:
             self.kernel = tf.Variable(
                 tf.random.normal(shape=(self.patch, self.patch, C, n_out), stddev=self.sigma), name="kernel", trainable=True
@@ -186,7 +168,7 @@ class PatchQKSEncodingLayer(tf.keras.layers.Layer):
         if self.pad:
             x = tf.pad(x, [[0, 0], [self.pad, self.pad], [self.pad, self.pad], [0, 0]])
         if self.share_positions:
-            theta = tf.nn.conv2d(x, self.kernel, strides=self.stride, padding="VALID") + self.bias  # (B, gh, gw, 2G)
+            theta = tf.nn.conv2d(x, self.kernel, strides=self.stride, padding="VALID") + self.bias  # (B, gh, gw, kG)
         else:
             P = tf.image.extract_patches(
                 x,
@@ -196,8 +178,8 @@ class PatchQKSEncodingLayer(tf.keras.layers.Layer):
                 padding="VALID",
             )  # (B, gh, gw, patch*patch*C), inner order (py, px, c) = the kernel's flatten order
             P = tf.reshape(P, [-1, self.n_pos, self.patch * self.patch * C])
-            theta = tf.einsum("bnk,nko->bno", P, self.kernel) + self.bias  # (B, n_pos, 2G)
-        theta = tf.reshape(theta, [-1, self.n_leaves, 2])  # register r = pos*G + g, last axis f
+            theta = tf.einsum("bnk,nko->bno", P, self.kernel) + self.bias  # (B, n_pos, kG)
+        theta = tf.reshape(theta, [-1, self.n_leaves, self.qubits])  # register r = pos*G + g
         return tf.gather(theta, self.perm, axis=1)  # leaf slot l <- register perm[l]
 
     def call(self, inputs):
@@ -215,6 +197,7 @@ class PatchQKSEncodingLayer(tf.keras.layers.Layer):
                 groups=self.groups,
                 share_positions=self.share_positions,
                 leaf_order=self.leaf_order,
+                bond_dim=self.chi,
             )
         )
         return cfg

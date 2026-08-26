@@ -46,6 +46,9 @@ from scipy.stats import unitary_group
 from qks_tn import ConstMul, ConstMulBinary, FeatureEncodingLayer  # noqa: F401
 
 __all__ = [
+    "angles_to_registers",
+    "fixed_readout_matrix",
+    "ConstMulFixed",
     "hermitian_basis",
     "random_hermitian_params",
     "params_to_hermitian",
@@ -143,23 +146,90 @@ def sample_shots(p: tf.Tensor, shots: int) -> tf.Tensor:
 
 
 # --------------------------------------------------------------------------------------
+# Angles -> registers, for any register size chi = 2**k
+# --------------------------------------------------------------------------------------
+def angles_to_registers(theta: tf.Tensor) -> tf.Tensor:
+    """``theta`` (B, L, k) real -> (B, chi, chi, L) complex64 with ``chi = 2**k``.
+
+    Each angle becomes a single-qubit density matrix (the quantum-kitchen-sink state) and
+    the k qubits of a register are combined by a k-fold Kronecker product, in order.
+    For k = 2 this reproduces ``FeatureEncodingLayer``'s pairing exactly.
+    """
+    k = theta.shape[-1]
+    L = theta.shape[1]
+    zero = tf.zeros_like(theta)
+    r00 = tf.complex(tf.math.cos(theta / 2) ** 2, zero)
+    r01 = tf.complex(zero, tf.math.sin(theta) / 2)
+    r11 = tf.complex(tf.math.sin(theta / 2) ** 2, zero)
+    rho1 = tf.stack([tf.stack([r00, r01], axis=-1), tf.stack([-r01, r11], axis=-1)], axis=-2)  # (B, L, k, 2, 2)
+    acc = rho1[:, :, 0]
+    dim = 2
+    for i in range(1, k):
+        acc = tf.einsum("nlab,nlcd->nlacbd", acc, rho1[:, :, i])
+        dim *= 2
+        acc = tf.reshape(acc, [-1, L, dim, dim])
+    return tf.transpose(acc, [0, 2, 3, 1])
+
+
+def fixed_readout_matrix(n_outcomes: int, n_classes: int) -> np.ndarray:
+    """Block 0/1 assignment of readout outcomes to classes, (n_classes, n_outcomes).
+
+    Outcomes are handed out in order, the first ``n_outcomes % n_classes`` classes getting
+    one extra.  For (16, 10) this is exactly ``qks_tn.ConstMul``; for (16, 2) exactly
+    ``qks_tn.ConstMulBinary``; (64, 10) is the chi=8 analogue.
+    """
+    if n_outcomes < n_classes:
+        raise ValueError(f"cannot spread {n_outcomes} outcomes over {n_classes} classes")
+    q, r = divmod(n_outcomes, n_classes)
+    M = np.zeros((n_classes, n_outcomes), dtype="float32")
+    j = 0
+    for c in range(n_classes):
+        take = q + (1 if c < r else 0)
+        M[c, j : j + take] = 1.0
+        j += take
+    return M
+
+
+class ConstMulFixed(tf.keras.layers.Layer):
+    """Non-trainable readout: sums blocks of outcome probabilities into class scores."""
+
+    def __init__(self, n_outcomes: int, n_classes: int, **kwargs):
+        super().__init__(**kwargs)
+        self.n_outcomes, self.n_classes = int(n_outcomes), int(n_classes)
+        self.const = tf.constant(fixed_readout_matrix(n_outcomes, n_classes))
+        self.built = True
+
+    def call(self, inputs, **kwargs):
+        return tf.linalg.matvec(self.const, inputs)
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update(dict(n_outcomes=self.n_outcomes, n_classes=self.n_classes))
+        return cfg
+
+
+# --------------------------------------------------------------------------------------
 # Batched feature encoding (same maths as qks_tn.FeatureEncodingLayer)
 # --------------------------------------------------------------------------------------
 class FastFeatureEncodingLayer(tf.keras.layers.Layer):
     """Quantum-kitchen-sink feature map, fully batched.
 
-    Same parameters, initialisation order and output ``(batch, chi, chi, units/2)`` as
+    Same parameters, initialisation order and output ``(batch, chi, chi, units/k)`` as
     ``qks_tn.FeatureEncodingLayer`` (so with the same global seed the weights coincide),
-    but without ``tf.vectorized_map`` and the per-episode scatter loop.  Only ``chi=4``
-    (pairs of single-qubit states) is supported, as in the original.
+    but without ``tf.vectorized_map`` and the per-episode scatter loop.  Unlike the
+    original this supports any ``chi = 2**k``: k consecutive episodes form one register.
     """
 
     def __init__(self, units, bond_dim, input_dim, sigma, **kwargs):
         super().__init__(**kwargs)
-        if bond_dim != 4:
-            raise NotImplementedError("FastFeatureEncodingLayer supports chi=4 only")
+        k = int(np.log2(bond_dim))
+        if 2**k != bond_dim or k < 1:
+            raise ValueError(f"bond_dim must be a power of two, got {bond_dim}")
+        if units % k:
+            raise ValueError(f"units ({units}) must be divisible by log2(chi) = {k}")
         self.units = units
         self.chi = bond_dim
+        self.qubits = k
         self.sigma = sigma
         self.W = tf.Variable(
             tf.random.normal(shape=(units, input_dim), stddev=sigma), name="W", trainable=True
@@ -168,18 +238,8 @@ class FastFeatureEncodingLayer(tf.keras.layers.Layer):
 
     def call(self, inputs):
         theta = tf.matmul(inputs, self.W, transpose_b=True) + self.b  # (B, units)
-        zero = tf.zeros_like(theta)
-        r00 = tf.complex(tf.math.cos(theta / 2) ** 2, zero)
-        r01 = tf.complex(zero, tf.math.sin(theta) / 2)
-        r11 = tf.complex(tf.math.sin(theta / 2) ** 2, zero)
-        rho1 = tf.stack(
-            [tf.stack([r00, r01], axis=-1), tf.stack([-r01, r11], axis=-1)], axis=-2
-        )  # (B, units, 2, 2)
-        a = rho1[:, 0::2]
-        b = rho1[:, 1::2]
-        rho2 = tf.einsum("nkab,nkcd->nkacbd", a, b)  # kron(a, b)
-        rho2 = tf.reshape(rho2, [-1, self.units // 2, 4, 4])
-        return tf.transpose(rho2, [0, 2, 3, 1])  # (B, 4, 4, units/2)
+        theta = tf.reshape(theta, [-1, self.units // self.qubits, self.qubits])
+        return angles_to_registers(theta)  # (B, chi, chi, units/k)
 
 
 # --------------------------------------------------------------------------------------
