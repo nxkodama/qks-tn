@@ -17,11 +17,14 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
 - [~] **B. Collect `imagenet32-L5`** — 4 jobs, 15 epochs, dense encoder, 1000-way linear head.
   At epoch 7: val acc 0.55–0.75 % (chance 0.1 %). Analyse when done; expect the 16-outcome readout to
   be the binding constraint → motivates item D.
-- [ ] **C. χ = 8 benchmark + MNIST/CIFAR sweeps.** χ = 8 is implemented (3 filters/register, 64-outcome
+- [~] **C. χ = 8 benchmark + MNIST/CIFAR sweeps.** χ = 8 is implemented (3 filters/register, 64-outcome
   readout, 2.29 M TN params for per-vertex B). First benchmark ms/step on T4 / L40S / A100-40GB with
   `--configs L4 --chi 8 --limit-train 9600 --epochs 2` (the step should become compute-bound, so the
   bigger GPUs may finally win on cost). Then 15-epoch sweeps `chi8-mnist`, `chi8-cifar` with
   configs L1,L4 (+ dense C0,C4 for the paper-model comparison), 3 seeds, on the cheapest GPU per step.
+  **Benchmarked 22:00:** L40S 37 ms/step ($0.47/job), A100-40GB 50 ($0.68), T4 135 ($0.52) — as predicted
+  the step is now compute-bound and the L40S wins on both speed and cost; use `--gpu L40S` for chi=8.
+  Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched 22:02 on L40S.
 - [ ] **D. χ = 8 on ImageNet-32** — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
   epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
 - [ ] **E. Two-stage "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
@@ -38,3 +41,6 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   matches the original `FeatureEncodingLayer` to 6e−8, and `fixed_readout_matrix(16,10)/(16,2)`
   reproduce `ConstMul`/`ConstMulBinary` exactly. χ = 8 dense encoder needs 192 episodes for 64 leaves;
   patch encoder uses 3 filters per register (147 params on CIFAR 4×4×3).
+- 22:00 **chi = 8 early signal is strong**: 2 epochs on 9,600 CIFAR images gives val acc 0.322 vs 0.167
+  for chi = 4 under the identical setting (L4, patch encoder). The 64-outcome readout and the 64x64
+  vertex unitaries both help; full 15-epoch sweeps launched.

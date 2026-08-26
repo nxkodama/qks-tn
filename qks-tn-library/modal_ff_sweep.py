@@ -144,6 +144,7 @@ def main(
     pad: int = -1,
     sigma_scale: float = 0.0,
     head: str = "",
+    chi: int = 0,
 ):
     """``fresh=True`` ignores existing checkpoints on the Volume and retrains from scratch.
     ``nepisodes`` sets the tree depth (128 -> 6 layers, 256 -> 7, 512 -> 8, 64 -> 5).
@@ -177,6 +178,13 @@ def main(
                 ov["sigma_scale"] = float(sigma_scale)
             if head:
                 ov["head"] = head
+            if chi:
+                ov["chi"] = int(chi)
+                if not ov.get("encoder", "dense") == "patch":
+                    # dense encoder: leaves = nepisodes / log2(chi); keep 64 leaves (6 layers)
+                    import math
+
+                    ov["nepisodes"] = int(nepisodes // 2 * int(math.log2(int(chi))))
             if limit_train:
                 ov["limit_train"] = int(limit_train)
             cfg = rfe.make_cfg(**ov)
