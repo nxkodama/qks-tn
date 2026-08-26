@@ -15,8 +15,10 @@ Checkpointing: a ``tf.train.Checkpoint`` (weights, AdamW moments, optimizer step
 is written to ``cfg['ckpt_dir']`` after every epoch together with the metric history.
 Re-running with a larger ``--epochs`` and ``--resume`` continues training from the last
 epoch with the learning-rate / weight-decay schedules exactly where they left off.
-Note the schedule's warm-restart cycles are 1, 2, 4, 8, 16, ... epochs, so cycle-aligned
-totals are 15, 31, 63 epochs.
+The schedule's warm-restart cycles are 1, 2, 4, 8, 16, ... epochs, so cycles end at epochs
+1, 3, 7, 15, 31, 63; the state at each of these is kept permanently in
+``<ckpt_dir>/cycle-<epoch>/`` (restore one with ``--resume-from``), while ``<ckpt_dir>/ckpt-*``
+is the rolling latest.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ DEFAULTS = dict(
     out=None,
     ckpt_dir=None,  # directory for per-epoch tf.train.Checkpoint (None = no checkpointing)
     resume=False,  # resume from the latest checkpoint in ckpt_dir if one exists
+    resume_from=None,  # explicit checkpoint prefix to restore instead (e.g. <ckpt_dir>/cycle-015/ckpt)
     name=None,
     nepisodes=128,
     chi=4,
@@ -290,15 +293,21 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
         ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
         manager = tf.train.CheckpointManager(ckpt, ckpt_dir, max_to_keep=1)
         hist_path = os.path.join(ckpt_dir, "history.json")
-        if cfg.get("resume") and manager.latest_checkpoint and os.path.exists(hist_path):
+        restore_path = None
+        if cfg.get("resume_from"):
+            restore_path = cfg["resume_from"]
+            hist_path = os.path.join(os.path.dirname(restore_path), "history.json")
+        elif cfg.get("resume") and manager.latest_checkpoint:
+            restore_path = manager.latest_checkpoint
+        if restore_path is not None and os.path.exists(hist_path):
             with open(hist_path) as f:
                 saved = json.load(f)
             history = saved["epochs"]
             initial_epoch = len(history)
-            ckpt.restore(manager.latest_checkpoint).expect_partial()
-            log(f"[{cfg['name']}] resumed from {manager.latest_checkpoint} at epoch {initial_epoch}")
-        elif cfg.get("resume"):
-            log(f"[{cfg['name']}] no checkpoint in {ckpt_dir}; starting fresh")
+            ckpt.restore(restore_path).expect_partial()
+            log(f"[{cfg['name']}] resumed from {restore_path} at epoch {initial_epoch}")
+        elif cfg.get("resume") or cfg.get("resume_from"):
+            log(f"[{cfg['name']}] no checkpoint to resume from in {ckpt_dir}; starting fresh")
         with open(os.path.join(ckpt_dir, "cfg.json"), "w") as f:
             json.dump(cfg, f, indent=1)
     if initial_epoch >= int(cfg["epochs"]):
@@ -335,9 +344,20 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
             )
             history.append(rec)
             if manager is not None:
-                manager.save(checkpoint_number=rec["epoch"])
+                manager.save(checkpoint_number=rec["epoch"])  # rolling latest
+                state = dict(cfg=cfg, params=counts, epochs=list(history))
                 with open(os.path.join(cfg["ckpt_dir"], "history.json"), "w") as f:
-                    json.dump(dict(cfg=cfg, params=counts, epochs=list(history)), f)
+                    json.dump(state, f)
+                e = rec["epoch"]
+                if (e + 1) & e == 0:
+                    # e = 2^k - 1: end of a cosine-annealing cycle (1, 3, 7, 15, 31, 63, ...);
+                    # keep this state permanently
+                    cycle_dir = os.path.join(cfg["ckpt_dir"], f"cycle-{e:03d}")
+                    os.makedirs(cycle_dir, exist_ok=True)
+                    ckpt.write(os.path.join(cycle_dir, "ckpt"))
+                    with open(os.path.join(cycle_dir, "history.json"), "w") as f:
+                        json.dump(state, f)
+                    rec["cycle_checkpoint"] = cycle_dir
             log(
                 f"[{cfg['name']}] epoch {rec['epoch']}/{cfg['epochs']} "
                 f"loss {rec['loss']:.4f} acc {rec['acc']:.4f} "
@@ -429,6 +449,7 @@ def build_parser():
     ap.add_argument("--ckpt-dir", dest="ckpt_dir", help="checkpoint directory (default runs/ckpt/<name>)")
     ap.add_argument("--no-checkpoint", dest="no_checkpoint", action="store_true", help="disable checkpointing")
     ap.add_argument("--resume", action="store_true", default=None, help="continue from the latest checkpoint in --ckpt-dir")
+    ap.add_argument("--resume-from", dest="resume_from", help="checkpoint prefix to restore, e.g. runs/ckpt/<name>/cycle-015/ckpt")
     return ap
 
 
