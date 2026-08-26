@@ -130,6 +130,29 @@ above it — the classical re-encoding buys nothing beyond the parameters it spe
 4× fewer parameters). Feedforward still helps inside it (+5.1 ± 0.4 pp). Ranking of the expressivity
 levers tested: **bond dimension ≫ feature maps > receptive field ≈ two-stage re-encoding ≈ nothing**.
 
+### Finite-shot feedforward (sweep `shots-mnist`, config C2, 3 seeds)
+
+Mode B feeds *estimated* probabilities on hardware, so the estimate is noisy. Replacing the exact `p`
+with a Multinomial(M, p)/M sample per vertex per example (straight-through gradient):
+
+| shots M | MNIST test acc |
+|---|---|
+| exact | 0.9736 ± 0.0018 |
+| 1024 | 0.9735 ± 0.0014 |
+| 128 | 0.9736 ± 0.0015 |
+| 16 | 0.9712 ± 0.0004 |
+
+128 shots per vertex is indistinguishable from exact statistics and even 16 shots costs 0.24 pp — the
+practical objection to Case B on hardware (estimating a distribution at every vertex) is mild.
+
+### Do the levers stack?
+
+Not all of them. At chi = 4, G = 2 feature maps were worth +1.85 pp; at chi = 8 they add +0.13 ± 0.15 pp
+(0.5303 vs 0.5290) for twice the parameters and 1.6× the step cost — **bond dimension subsumes feature
+maps**. Locality and feedforward, by contrast, keep compounding with chi (their gains *grew* from +10.5
+and +6.5 pp at chi = 4 to +15.1 and +8.2 pp at chi = 8). Best configuration found:
+**patch-local encoder + per-vertex multishot feedforward at chi = 8, G = 1 — CIFAR-10 0.5290 ± 0.0023.**
+
 ## Checkpointing and training for more epochs
 
 Every run writes a `tf.train.Checkpoint` (model weights, AdamW moments and the optimizer step counter that

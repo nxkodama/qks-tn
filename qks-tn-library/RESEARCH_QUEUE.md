@@ -31,7 +31,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
   with a second patch-QKS on the 4×4×16 field, second tree, head. Implement only if time remains after
   C/D; helpers `fold_blocks`/`unfold_blocks` were specified but not written.
-- [~] **F. Ablations** (`shots-mnist` launched 01:05: C2s16/128/1024 x 3 seeds): finite shots (`C2s16/128/1024`), `--ff-layers 5` and `4,5`,
+- [x] **F. Ablations** (finite shots done; ff-layers/centred still unrun): finite shots (`C2s16/128/1024`), `--ff-layers 5` and `4,5`,
   centred features (`C2c`). Cheap (~15 min/job); run on MNIST if GPU capacity is idle.
 - [ ] **G. Housekeeping** — keep `FEEDFORWARD.md` current; final summary of the night at the end.
 
@@ -113,3 +113,13 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   step buys nothing beyond the parameters it spends. Feedforward still helps inside it (+5.07 +/- 0.42 pp).
   Conclusion: of the four expressivity levers proposed, **bond dimension >> feature maps > (nothing) >
   receptive field = two-stage re-encoding**.
+- 02:30 **chi = 8 and G = 2 do NOT stack (CIFAR, L4, 3 seeds):** 0.5303 +/- 0.0015 vs chi=8 alone
+  0.5290 +/- 0.0023 -- +0.13 pp for 2x the parameters (4.65M vs 2.29M) and 1.6x the step cost
+  (59 vs 36 ms/step). Once the registers are wide, extra feature maps are redundant: **bond dimension
+  subsumes feature maps**. (At chi = 4, G=2 was worth +1.85 pp.) Best CIFAR configuration remains
+  chi = 8, G = 1, patch-local, per-vertex feedforward B: **0.5290**.
+- 02:30 **Finite-shot feedforward is cheap (MNIST, C2, 3 seeds)** -- the hardware-realism result:
+  exact statistics 0.9736 +/- 0.0018; **1024 shots 0.9735 +/- 0.0014; 128 shots 0.9736 +/- 0.0015;
+  16 shots 0.9712 +/- 0.0004**. 128 shots per vertex is indistinguishable from exact and even 16 shots
+  costs only 0.24 pp. The multishot feedforward does not need deep statistics to work, which is the
+  practical objection one would raise against Case B on real hardware.
