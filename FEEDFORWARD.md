@@ -95,6 +95,11 @@ drives the cosine-restart schedules) after each epoch, next to the metric histor
 - locally: `qks-tn-library/runs/ckpt/<run name>/` (disable with `--no-checkpoint`);
 - on Modal: `/out/<sweep>/<job>/ckpt/` on the `qks-tn-results` Volume.
 
+`ckpt-<epoch>` is the rolling latest (one kept); in addition the state at the end of every annealing
+cycle — epochs 1, 3, 7, 15, 31, 63 — is kept permanently in `cycle-<epoch>/` (checkpoint + history), so
+any cycle boundary can be restored with `--resume-from <ckpt_dir>/cycle-015/ckpt` (the local runner) or
+compared post hoc.
+
 To continue a run, re-issue it with a larger `--epochs`; the Modal launcher resumes automatically
 (`--fresh` retrains from scratch), the local runner needs `--resume`:
 
@@ -108,6 +113,11 @@ restarts fall at epochs 1, 3, 7, 15, 31, …; stop at a cycle boundary (15, 31, 
 mid-cycle leaves the learning rate high. Resumed training reproduces the schedule and the epoch-boundary
 state exactly; only the data-shuffle order differs from an uninterrupted run. The `ff-v1` sweep predates
 checkpointing, so extending it would retrain those jobs from scratch (31 epochs ≈ 15–30 min per job).
+
+Longer/deeper follow-up (launched 2026-08-25): sweeps `ff-v2-L6` (128 episodes, 6 layers) and `ff-v2-L7`
+(`--nepisodes 256`, 7 layers, QKS 200,960 params) with the minimal config set C0, C1, C2, C4 × 3 seeds at
+**63 epochs** (the fifth cycle boundary), with cycle checkpoints, to test whether the ff-v1 ordering holds
+with longer training and a deeper tree.
 
 ## Not yet done
 
