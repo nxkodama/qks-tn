@@ -87,6 +87,26 @@ Decision rule stated before the sweep (paired difference vs the parameter-matche
 every seed and > 2 s.e.m.): met by C4 vs C1, C5 vs C1, F2 vs F0, F5 vs F0; C2 vs C3 is positive on all
 seeds but its s.e.m. (0.36 pp) is inflated by the seed-2 tie, so it needs more seeds to clear the bar.
 
+### Bond dimension chi = 8 (sweep `chi8-cifar`, 3 seeds, 15 epochs)
+
+Registers become 3 qubits, vertex unitaries 64x64 (4,095 parameters each) and the readout 64
+probabilities instead of 16. The encoder generalises to log2(chi) filters per register; chi = 4 remains
+bit-compatible with the published code.
+
+| model | chi = 4 | chi = 8 |
+|---|---|---|
+| C0 dense baseline (the paper's model) | 0.2862 ± 0.0089 | 0.3218 ± 0.0119 |
+| C4 dense + feedforward B | 0.3501 ± 0.0084 | 0.3779 ± 0.0100 |
+| L1 patch-local, no feedforward | 0.3906 ± 0.0027 | 0.4466 ± 0.0029 |
+| **L4 patch-local + feedforward B** | 0.4552 ± 0.0042 | **0.5290 ± 0.0023** |
+
+**Locality, feedforward and bond dimension compound**: 0.2862 → 0.5290 is +24.3 pp (85 % relative) over
+the published model, and the locality and feedforward gains are each *larger* at chi = 8 (+15.1 and
++8.2 pp) than at chi = 4 (+10.5 and +6.5 pp) — a wider register gives the other two levers more to work
+with. At 64x64 unitaries the step becomes compute-bound, which flips the hardware economics: an L40S is
+both the fastest and the cheapest option (37 ms/step, $0.47 per 15-epoch job) where a T4 was cheapest at
+chi = 4.
+
 ## Checkpointing and training for more epochs
 
 Every run writes a `tf.train.Checkpoint` (model weights, AdamW moments and the optimizer step counter that

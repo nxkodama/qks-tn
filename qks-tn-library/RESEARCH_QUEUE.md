@@ -17,7 +17,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
 - [~] **B. Collect `imagenet32-L5`** — 4 jobs, 15 epochs, dense encoder, 1000-way linear head.
   At epoch 7: val acc 0.55–0.75 % (chance 0.1 %). Analyse when done; expect the 16-outcome readout to
   be the binding constraint → motivates item D.
-- [~] **C. χ = 8 benchmark + MNIST/CIFAR sweeps.** χ = 8 is implemented (3 filters/register, 64-outcome
+- [x] **C. χ = 8 benchmark + MNIST/CIFAR sweeps.** χ = 8 is implemented (3 filters/register, 64-outcome
   readout, 2.29 M TN params for per-vertex B). First benchmark ms/step on T4 / L40S / A100-40GB with
   `--configs L4 --chi 8 --limit-train 9600 --epochs 2` (the step should become compute-bound, so the
   bigger GPUs may finally win on cost). Then 15-epoch sweeps `chi8-mnist`, `chi8-cifar` with
@@ -27,7 +27,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   Sweeps `chi8-cifar` and `chi8-mnist` (C0,C4,L1,L4 x 3 seeds, 15 epochs) launched 22:02 on L40S.
 - [~] **D. χ = 8 on ImageNet-32** (launched 23:05: C0,C4 x seed 0, 7 epochs, L40S, ~$11) — the 64-outcome readout is the point; 1 seed, configs C0/C4 or L1/L4,
   epochs 7 (cycle boundary) to bound cost. Only after C shows χ = 8 trains sanely.
-- [ ] **E. Two-stage "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
+- [~] **E. Two-stage (implemented + `twostage-cifar` launched 23:45) "deep kitchen sinks"** (design in FEEDFORWARD.md / the plan file): fold 2×2 blocks
   into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
   with a second patch-QKS on the 4×4×16 field, second tree, head. Implement only if time remains after
   C/D; helpers `fold_blocks`/`unfold_blocks` were specified but not written.
@@ -67,3 +67,18 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   CIFAR **0.3218 +/- 0.0119** vs 0.2862 +/- 0.0089 (**+3.6 pp**). Doubling the register size helps the
   unmodified architecture everywhere, at 13 ms/step on an L40S (same as chi=4 on a T4). The chi=8
   feedforward arms (C4, L1, L4) are still running.
+- 23:45 **chi = 8 on CIFAR-10 is the headline: every lever compounds.** (3 seeds, 15 epochs, L40S)
+
+  | model | chi = 4 | chi = 8 | delta |
+  |---|---|---|---|
+  | C0 dense baseline (the paper's model) | 0.2862 | 0.3218 +/- 0.0119 | +3.6 pp |
+  | C4 dense + feedforward B | 0.3501 | 0.3779 +/- 0.0100 | +2.8 pp |
+  | L1 patch, no feedforward | 0.3906 | 0.4466 +/- 0.0029 | +5.6 pp |
+  | **L4 patch + feedforward B** | 0.4552 | **0.5290 +/- 0.0023** | **+7.4 pp** |
+
+  Cumulative over the paper's own model: **0.2862 -> 0.5290, +24.3 pp (85 % relative)**, from three
+  independent changes -- locality, feedforward, bond dimension -- none of which cannibalises the others.
+  The gains from locality (L4-C4 = +15.1 +/- 1.1 pp) and from feedforward (L4-L1 = +8.2 +/- 0.3 pp) are
+  both *larger* at chi = 8 than at chi = 4 (+10.5 and +6.5 pp), i.e. a wider register lets the other two
+  levers express more. Cost 36 ms/step on an L40S (~$0.47 per 15-epoch job).
+  Launched chi=8 x G=2 (the two winners combined) on CIFAR, L4, 3 seeds.
