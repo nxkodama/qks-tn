@@ -236,7 +236,11 @@ def make_dataset(X, y, batch_size: int, shuffle: bool, seed: int, shuffle_buffer
     if shuffle:
         buf = n if not shuffle_buffer else min(n, int(shuffle_buffer))
         ds = ds.shuffle(buf, seed=seed, reshuffle_each_iteration=True)
-    return ds.batch(batch_size).map(fetch, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+    # training: drop the ragged last batch so steps/epoch == n // batch_size exactly -- the
+    # CosineDecayRestarts cycles are defined in steps and would otherwise drift by one step per
+    # epoch (15 epochs => the last 15 steps run at the restarted peak learning rate)
+    ds = ds.batch(batch_size, drop_remainder=shuffle)
+    return ds.map(fetch, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
 
 
 # --------------------------------------------------------------------------------------
@@ -357,6 +361,40 @@ def _log(msg):
     print(msg, flush=True)
 
 
+def _atomic_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def _newest_checkpoint(ckpt_dir, latest_rolling):
+    """Pick the checkpoint with the most completed epochs among the rolling one and cycle-*/."""
+    import glob as _glob
+
+    cands = []
+    if latest_rolling:
+        hp = os.path.join(ckpt_dir, "history.json")
+        try:
+            with open(hp) as f:
+                n = len(json.load(f)["epochs"])
+            cands.append((n, latest_rolling, hp))
+        except Exception:  # noqa: BLE001  (torn/absent history -> ignore the rolling checkpoint)
+            pass
+    for d in _glob.glob(os.path.join(ckpt_dir, "cycle-*")):
+        hp = os.path.join(d, "history.json")
+        try:
+            with open(hp) as f:
+                n = len(json.load(f)["epochs"])
+            cands.append((n, os.path.join(d, "ckpt"), hp))
+        except Exception:  # noqa: BLE001
+            pass
+    if not cands:
+        return None, os.path.join(ckpt_dir, "history.json")
+    n, path, hp = max(cands)
+    return path, hp
+
+
 def train(cfg: dict, on_epoch=None, log=_log) -> dict:
     """Run one experiment; returns the result dict (also written to ``cfg['out']`` if set)."""
     import numpy as np
@@ -401,8 +439,8 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
         if cfg.get("resume_from"):
             restore_path = cfg["resume_from"]
             hist_path = os.path.join(os.path.dirname(restore_path), "history.json")
-        elif cfg.get("resume") and manager.latest_checkpoint:
-            restore_path = manager.latest_checkpoint
+        elif cfg.get("resume"):
+            restore_path, hist_path = _newest_checkpoint(ckpt_dir, manager.latest_checkpoint)
         if restore_path is not None and os.path.exists(hist_path):
             with open(hist_path) as f:
                 saved = json.load(f)
@@ -450,8 +488,7 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
             if manager is not None:
                 manager.save(checkpoint_number=rec["epoch"])  # rolling latest
                 state = dict(cfg=cfg, params=counts, epochs=list(history))
-                with open(os.path.join(cfg["ckpt_dir"], "history.json"), "w") as f:
-                    json.dump(state, f)
+                _atomic_json(os.path.join(cfg["ckpt_dir"], "history.json"), state)
                 e = rec["epoch"]
                 if (e + 1) & e == 0:
                     # e = 2^k - 1: end of a cosine-annealing cycle (1, 3, 7, 15, 31, 63, ...);
@@ -459,8 +496,7 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
                     cycle_dir = os.path.join(cfg["ckpt_dir"], f"cycle-{e:03d}")
                     os.makedirs(cycle_dir, exist_ok=True)
                     ckpt.write(os.path.join(cycle_dir, "ckpt"))
-                    with open(os.path.join(cycle_dir, "history.json"), "w") as f:
-                        json.dump(state, f)
+                    _atomic_json(os.path.join(cycle_dir, "history.json"), state)
                     rec["cycle_checkpoint"] = cycle_dir
             log(
                 f"[{cfg['name']}] epoch {rec['epoch']}/{cfg['epochs']} "
