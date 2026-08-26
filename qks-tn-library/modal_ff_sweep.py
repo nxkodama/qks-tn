@@ -18,7 +18,9 @@ pass ``--fresh`` to ignore them). Cycle-aligned totals for the cosine-restart sc
 
     python3 -m modal run qks-tn-library/modal_ff_sweep.py --configs C0,C2,C4 --seeds 0,1,2 --epochs 31 --sweep ff-v1
 
-GPU type: ``QKS_GPU=A10G python3 -m modal run ...`` (default ``T4``; ``QKS_GPU=none`` for CPU).
+GPU type: ``--gpu A10G`` (or ``QKS_GPU=A10G`` env; default ``T4``; ``none`` for CPU).
+Other datasets: ``--task cifar10`` / ``--task imagenet32`` (``--nepisodes 64`` for a 5-layer tree);
+the dataset is downloaded/decoded once into the ``qks-tn-data`` Volume by a CPU job.
 Mid-run progress::
 
     python3 -m modal volume ls qks-tn-results ff-v1
@@ -42,7 +44,8 @@ app = modal.App("qks-tn-feedforward")
 
 image = (
     modal.Image.from_registry("tensorflow/tensorflow:2.15.0-gpu")
-    .pip_install("tensorflow-addons==0.23.0", "tensornetwork==0.4.6", "scipy", "numpy<2")
+    .pip_install("tensorflow-addons==0.23.0", "tensornetwork==0.4.6", "scipy", "numpy<2",
+                 "datasets", "huggingface_hub", "pillow", "pyarrow")
     .add_local_dir(os.path.join(HERE, "common_functions"), remote_path="/root/qks/common_functions")
     .add_local_file(os.path.join(HERE, "run_ff_experiment.py"), remote_path="/root/qks/run_ff_experiment.py")
 )
@@ -51,15 +54,29 @@ results_vol = modal.Volume.from_name("qks-tn-results", create_if_missing=True)
 data_vol = modal.Volume.from_name("qks-tn-data", create_if_missing=True)
 
 
-@app.function(
-    image=image,
-    gpu=GPU_SPEC,
-    cpu=4 if GPU_SPEC is None else 2,
-    memory=8192,
-    timeout=8 * 60 * 60,
-    volumes={"/out": results_vol, "/data": data_vol},
-)
-def train_job(cfg: dict, sweep: str) -> dict:
+# Host memory per task: the training set is held in a CPU tf.Variable (uint8 for images).
+TASK_MEMORY_MB = {"binary": 8192, "multiclass": 8192, "cifar10": 8192, "imagenet32": 24576}
+
+
+@app.function(image=image, cpu=8, memory=32768, timeout=3 * 60 * 60, volumes={"/data": data_vol})
+def prepare_data(task: str) -> dict:
+    """Download / decode a dataset into the shared data Volume once (CPU only)."""
+    import time
+
+    sys.path.insert(0, "/root/qks")
+    import run_ff_experiment as rfe
+
+    data_vol.reload()
+    t0 = time.time()
+    X_train, y_train, X_test, y_test = rfe.load_data(task, "/data", log=lambda s: print(s, flush=True))
+    data_vol.commit()
+    info = dict(task=task, n_train=int(len(y_train)), n_test=int(len(y_test)), dim=int(X_train.shape[1]),
+                dtype=str(X_train.dtype), seconds=time.time() - t0)
+    print(f"[prepare_data] {info}", flush=True)
+    return info
+
+
+def _train_job(cfg: dict, sweep: str) -> dict:
     import time
 
     sys.path.insert(0, "/root/qks")
@@ -76,10 +93,10 @@ def train_job(cfg: dict, sweep: str) -> dict:
     cfg["ckpt_dir"] = f"{out_dir}/ckpt"
     cfg.setdefault("resume", True)
 
-    # Deskewed-MNIST cache shared across jobs (first job computes, later ones reuse).
+    # Dataset cache shared across jobs (prepare_data / the first job computes, later ones reuse).
     data_vol.reload()
     t0 = time.time()
-    rfe.load_data(cfg["task"], cfg["cache_dir"])
+    rfe.load_data(cfg["task"], cfg["cache_dir"], log=lambda s: print(s, flush=True))
     data_vol.commit()
     print(f"[{cfg['name']}] data ready in {time.time() - t0:.0f}s", flush=True)
 
@@ -93,6 +110,22 @@ def train_job(cfg: dict, sweep: str) -> dict:
     return res
 
 
+@app.cls(
+    image=image,
+    gpu=GPU_SPEC,
+    cpu=4 if GPU_SPEC is None else 2,
+    memory=8192,
+    timeout=8 * 60 * 60,
+    volumes={"/out": results_vol, "/data": data_vol},
+)
+class Trainer:
+    """One training job per call; GPU / memory are overridden per run via ``Trainer.with_options``."""
+
+    @modal.method()
+    def train(self, cfg: dict, sweep: str) -> dict:
+        return _train_job(cfg, sweep)
+
+
 @app.local_entrypoint()
 def main(
     configs: str = "C0,C1,C2,C3,C4,C5,F0,F2,F5",
@@ -103,11 +136,23 @@ def main(
     limit_train: int = 0,
     fresh: bool = False,
     nepisodes: int = 128,
+    gpu: str = "",
+    memory_mb: int = 0,
 ):
     """``fresh=True`` ignores existing checkpoints on the Volume and retrains from scratch.
-    ``nepisodes`` sets the tree depth (128 -> 6 layers, 256 -> 7, 512 -> 8)."""
+    ``nepisodes`` sets the tree depth (128 -> 6 layers, 256 -> 7, 512 -> 8, 64 -> 5).
+    ``gpu`` overrides the GPU type for this run (T4, L4, A10G, L40S, A100-40GB, A100-80GB, H100);
+    ``memory_mb`` overrides host memory (default depends on the task)."""
     sys.path.insert(0, HERE)
     import run_ff_experiment as rfe
+
+    gpu_name = gpu or GPU
+    mem = int(memory_mb) or TASK_MEMORY_MB.get(task, 8192)
+    job = Trainer.with_options(gpu=(None if gpu_name.lower() == "none" else gpu_name), memory=mem)()
+
+    if task in ("cifar10", "imagenet32"):
+        print(f"preparing {task} on the data Volume (no-op if cached) ...")
+        print(prepare_data.remote(task))
 
     cfgs = []
     for c in [x.strip() for x in configs.split(",") if x.strip()]:
@@ -120,8 +165,8 @@ def main(
             cfg["config"] = c
             cfg["resume"] = not fresh
             cfgs.append(cfg)
-    print(f"spawning {len(cfgs)} jobs on {GPU} (sweep={sweep}, task={task}, epochs={epochs}, nepisodes={nepisodes})")
-    handles = [train_job.spawn(cfg, sweep) for cfg in cfgs]
+    print(f"spawning {len(cfgs)} jobs on {gpu_name} / {mem} MB (sweep={sweep}, task={task}, epochs={epochs}, nepisodes={nepisodes})")
+    handles = [job.train.spawn(cfg, sweep) for cfg in cfgs]
 
     out_dir = Path(HERE) / "results" / sweep
     out_dir.mkdir(parents=True, exist_ok=True)

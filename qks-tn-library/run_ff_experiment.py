@@ -34,7 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "common_functions"))
 
 DEFAULTS = dict(
-    task="multiclass",  # binary | multiclass
+    task="multiclass",  # binary | multiclass | cifar10 | imagenet32
     mode="baseline",  # baseline | A | B
     impl="new",  # new (qks_tn_ff sweep) | old (original TNLayer; baseline only)
     epochs=15,
@@ -59,7 +59,9 @@ DEFAULTS = dict(
     name=None,
     nepisodes=128,
     chi=4,
-    sigma=0.125,
+    sigma=0.125,  # QKS weight std for 784-dim inputs; scaled by sqrt(784/p) for other input sizes
+    head="auto",  # const (paper's fixed 0/1 readout, <=10 classes) | linear (trainable logits) | auto
+    shuffle_buffer=250_000,  # cap on the shuffle buffer (full shuffle below this size)
     lr=1e-3,
     wd=4e-4,
 )
@@ -122,10 +124,64 @@ def _parse_layers(v):
 # --------------------------------------------------------------------------------------
 # Data
 # --------------------------------------------------------------------------------------
-def load_data(task: str, cache_dir: str):
-    """Notebook pipeline: MNIST -> (3,5) filter for binary -> /255 -> float32 -> deskew."""
+N_CLASSES = {"binary": 2, "multiclass": 10, "cifar10": 10, "imagenet32": 1000}
+HF_IMAGENET32 = "benjamin-paine/imagenet-1k-32x32"  # ImageNet-1k, centre-crop + Lanczos to 32x32
+
+
+def _hf_split_to_uint8(repo: str, split: str, log=print):
+    """Decode an image-classification HF split to (X uint8 (n, 3072), y int16)."""
+    import numpy as np
+    from datasets import load_dataset
+
+    ds = load_dataset(repo, split=split)
+    label_col = "class_label" if "class_label" in ds.column_names else "label"
+    n = len(ds)
+    X = np.empty((n, 32 * 32 * 3), dtype=np.uint8)
+    y = np.asarray(ds[label_col], dtype=np.int16)
+    t0 = time.time()
+    for i, img in enumerate(ds["image"] if n < 200_000 else (ex["image"] for ex in ds)):
+        X[i] = np.asarray(img.convert("RGB"), dtype=np.uint8).reshape(-1)
+        if i % 200_000 == 0 and i:
+            log(f"  decoded {i}/{n} ({time.time() - t0:.0f}s)")
+    return X, y
+
+
+def load_data(task: str, cache_dir: str, log=print):
+    """Data pipeline per task.
+
+    binary / multiclass : the notebooks' MNIST pipeline (/255, float32, deskew); returns float32.
+    cifar10             : tf.keras CIFAR-10, (n, 3072) uint8 channels-last (scaled to [0,1] in the
+                          tf.data pipeline); 10 classes, fixed readout as for MNIST.
+    imagenet32          : HF ``benjamin-paine/imagenet-1k-32x32`` train (1,281,167) / validation
+                          (50,000), (n, 3072) uint8; 1000 classes -> trainable linear head.
+    """
     import numpy as np
     os.makedirs(cache_dir, exist_ok=True)
+    if task in ("cifar10", "imagenet32"):
+        d = os.path.join(cache_dir, task)
+        files = [os.path.join(d, f) for f in ("X_train.npy", "y_train.npy", "X_test.npy", "y_test.npy")]
+        if not all(os.path.exists(f) for f in files):
+            os.makedirs(d, exist_ok=True)
+            if task == "cifar10":
+                from tensorflow.keras.datasets import cifar10
+
+                (Xtr, ytr), (Xte, yte) = cifar10.load_data()
+                Xtr = Xtr.reshape(len(Xtr), -1).astype(np.uint8)
+                Xte = Xte.reshape(len(Xte), -1).astype(np.uint8)
+                ytr, yte = ytr.reshape(-1).astype(np.int16), yte.reshape(-1).astype(np.int16)
+            else:
+                log(f"downloading + decoding {HF_IMAGENET32} (train)")
+                Xtr, ytr = _hf_split_to_uint8(HF_IMAGENET32, "train", log)
+                log(f"downloading + decoding {HF_IMAGENET32} (validation)")
+                Xte, yte = _hf_split_to_uint8(HF_IMAGENET32, "validation", log)
+                keep = yte < 1000  # label 1000 = "none" (only in the unlabeled test split)
+                Xte, yte = Xte[keep], yte[keep]
+            for f, a in zip(files, (Xtr, ytr, Xte, yte)):
+                np.save(f + ".tmp.npy", a)
+                os.replace(f + ".tmp.npy", f)
+        X_train, y_train, X_test, y_test = (np.load(f, mmap_mode="r") for f in files)
+        return np.ascontiguousarray(X_train), np.asarray(y_train).astype("float32"), np.ascontiguousarray(X_test), np.asarray(y_test).astype("float32")
+
     cache = os.path.join(cache_dir, f"mnist_deskew_{task}.npz")
     if os.path.exists(cache):
         z = np.load(cache)
@@ -153,23 +209,54 @@ def load_data(task: str, cache_dir: str):
     return X_train, y_train, X_test, y_test
 
 
+def make_dataset(X, y, batch_size: int, shuffle: bool, seed: int, shuffle_buffer: int = 250_000):
+    """tf.data pipeline backed by a CPU tf.Variable (sidesteps the 2 GB graph-constant limit).
+
+    Indices are shuffled (full shuffle up to ``shuffle_buffer`` examples) and batches gathered
+    from the variable; uint8 images are scaled to [0, 1] on the fly.
+    """
+    import numpy as np
+    import tensorflow as tf
+
+    n = len(y)
+    with tf.device("/CPU:0"):
+        X_var = tf.Variable(X, trainable=False, name="X_data")
+        y_var = tf.Variable(np.asarray(y, dtype="float32"), trainable=False, name="y_data")
+    scale = X_var.dtype == tf.uint8
+
+    def fetch(idx):
+        xb = tf.gather(X_var, idx)
+        if scale:
+            xb = tf.cast(xb, tf.float32) / 255.0
+        return xb, tf.gather(y_var, idx)
+
+    ds = tf.data.Dataset.range(n)
+    if shuffle:
+        ds = ds.shuffle(min(n, shuffle_buffer), seed=seed, reshuffle_each_iteration=True)
+    return ds.batch(batch_size).map(fetch, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+
+
 # --------------------------------------------------------------------------------------
 # Model
 # --------------------------------------------------------------------------------------
-def build_model(cfg: dict, steps_per_epoch: int):
+def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | None = None):
     import numpy as np
     import tensorflow as tf
     from tensorflow_addons.optimizers import AdamW
 
     import qks_tn_ff as ff
 
-    p = 784
+    n_classes = n_classes or N_CLASSES[cfg["task"]]
+    sigma = float(cfg["sigma"]) * float(np.sqrt(784.0 / p))  # keep the kitchen-sink angle scale
+    head_kind = cfg.get("head", "auto")
+    if head_kind == "auto":
+        head_kind = "const" if n_classes <= 10 else "linear"
     nlayers = int(np.log2(cfg["nepisodes"] / np.log2(cfg["chi"])))
     tf.keras.utils.set_random_seed(int(cfg["seed"]))
     if cfg["fast_qks"]:
-        qks = ff.FastFeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, cfg["sigma"])
+        qks = ff.FastFeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
     else:
-        qks = ff.FeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, cfg["sigma"])
+        qks = ff.FeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
 
     if cfg["impl"] == "old":
         if cfg["mode"] != "baseline":
@@ -200,7 +287,18 @@ def build_model(cfg: dict, steps_per_epoch: int):
         )
         tn_effective = None
 
-    head = ff.ConstMulBinary() if cfg["task"] == "binary" else ff.ConstMul()
+    if head_kind == "const":
+        if n_classes == 2:
+            head = ff.ConstMulBinary()
+        elif n_classes == 10:
+            head = ff.ConstMul()
+        else:
+            raise ValueError("the fixed readout supports 2 or 10 classes; use head='linear'")
+        loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
+    else:
+        # trainable logits from the 16 readout probabilities (needed when classes > 16)
+        head = tf.keras.layers.Dense(n_classes, name="linear_head")
+        loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
     model = tf.keras.Sequential([tf.keras.layers.InputLayer(input_shape=(p,)), qks, tn_layer, head])
     if cfg["freeze_qks"]:
         qks.trainable = False
@@ -208,7 +306,7 @@ def build_model(cfg: dict, steps_per_epoch: int):
     lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["lr"], steps_per_epoch)
     wd_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["wd"], steps_per_epoch)
     model.compile(
-        loss="sparse_categorical_crossentropy",
+        loss=loss,
         optimizer=AdamW(learning_rate=lr_schedule, weight_decay=wd_schedule),
         metrics=["accuracy"],
     )
@@ -217,7 +315,12 @@ def build_model(cfg: dict, steps_per_epoch: int):
         qks=int(qks.count_params()),
         tn=int(tn_layer.count_params()),
         tn_effective=int(tn_effective if tn_effective is not None else tn_layer.count_params()),
+        head=int(head.count_params()),
         trainable=int(sum(int(np.prod(v.shape)) for v in model.trainable_variables)),
+        input_dim=int(p),
+        n_classes=int(n_classes),
+        sigma=float(sigma),
+        head_kind=head_kind,
     )
     return model, qks, tn_layer, counts
 
@@ -232,19 +335,18 @@ def _git_commit():
         return None
 
 
-def _eval_sampled(model, X, y, batch_size):
+def _eval_sampled(model, test_ds):
     """Evaluate with ``training=True`` forward passes (finite-shot statistics)."""
     import numpy as np
     import tensorflow as tf
 
     losses, correct, n = 0.0, 0, 0
-    for i in range(0, len(X), batch_size):
-        xb, yb = X[i : i + batch_size], y[i : i + batch_size]
+    for xb, yb in test_ds:
         pr = model(xb, training=True)
-        loss = tf.keras.losses.sparse_categorical_crossentropy(yb, pr)
-        losses += float(tf.reduce_sum(loss))
-        correct += int(np.sum(np.argmax(pr.numpy(), -1) == yb))
-        n += len(xb)
+        loss = model.loss(yb, pr)
+        losses += float(loss) * int(xb.shape[0])
+        correct += int(np.sum(np.argmax(pr.numpy(), -1) == yb.numpy()))
+        n += int(xb.shape[0])
     return dict(loss=losses / n, acc=correct / n)
 
 
@@ -264,23 +366,21 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
     tf.get_logger().setLevel("ERROR")
 
     t_start = time.time()
-    X_train, y_train, X_test, y_test = load_data(cfg["task"], cfg["cache_dir"])
+    X_train, y_train, X_test, y_test = load_data(cfg["task"], cfg["cache_dir"], log=log)
     if cfg.get("limit_train"):
         X_train, y_train = X_train[: int(cfg["limit_train"])], y_train[: int(cfg["limit_train"])]
     bs = int(cfg["batch_size"])
     steps_per_epoch = len(y_train) // bs
+    p = int(X_train.shape[1])
+    n_classes = N_CLASSES[cfg["task"]]
 
-    model, qks, tn_layer, counts = build_model(cfg, steps_per_epoch)
+    model, qks, tn_layer, counts = build_model(cfg, steps_per_epoch, p=p, n_classes=n_classes)
     devices = [d.device_type for d in tf.config.list_physical_devices()]
-    log(f"[{cfg['name']}] devices={devices} params={counts} steps/epoch={steps_per_epoch}")
+    log(f"[{cfg['name']}] devices={devices} params={counts} steps/epoch={steps_per_epoch} n_train={len(y_train)} n_test={len(y_test)}")
 
     tf.keras.utils.set_random_seed(int(cfg["seed"]))
-    train_ds = (
-        tf.data.Dataset.from_tensor_slices((X_train, y_train))
-        .shuffle(buffer_size=len(y_train), seed=int(cfg["seed"]), reshuffle_each_iteration=True)
-        .batch(bs)
-    )
-    test_ds = tf.data.Dataset.from_tensor_slices((X_test, y_test)).batch(bs)
+    train_ds = make_dataset(X_train, y_train, bs, shuffle=True, seed=int(cfg["seed"]), shuffle_buffer=int(cfg.get("shuffle_buffer", 250_000)))
+    test_ds = make_dataset(X_test, y_test, bs, shuffle=False, seed=int(cfg["seed"]))
 
     history = []
     initial_epoch = 0
@@ -407,7 +507,7 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
         va, nvl, ep = result["best_val"]
         result["best_val"] = dict(val_acc=va, val_loss=-nvl, epoch=ep)
     if cfg.get("shots"):
-        result["final_test_sampled"] = _eval_sampled(model, X_test, y_test, bs)
+        result["final_test_sampled"] = _eval_sampled(model, test_ds)
     log(
         f"[{cfg['name']}] DONE test_loss {test_loss:.4f} test_acc {test_acc:.4f} "
         f"wall {result['total_wall_s']/60:.1f} min ({result['ms_per_step']:.0f} ms/step)"
@@ -423,7 +523,8 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", choices=sorted(CONFIGS), help="named configuration (overrides mode/share/etc.)")
-    ap.add_argument("--task", choices=["binary", "multiclass"])
+    ap.add_argument("--task", choices=["binary", "multiclass", "cifar10", "imagenet32"])
+    ap.add_argument("--head", choices=["auto", "const", "linear"])
     ap.add_argument("--mode", choices=["baseline", "A", "B"])
     ap.add_argument("--impl", choices=["new", "old"])
     ap.add_argument("--epochs", type=int)
