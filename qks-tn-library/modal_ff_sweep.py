@@ -138,6 +138,12 @@ def main(
     nepisodes: int = 128,
     gpu: str = "",
     memory_mb: int = 0,
+    groups: int = 0,
+    patch: int = 0,
+    stride: int = 0,
+    pad: int = -1,
+    sigma_scale: float = 0.0,
+    head: str = "",
 ):
     """``fresh=True`` ignores existing checkpoints on the Volume and retrains from scratch.
     ``nepisodes`` sets the tree depth (128 -> 6 layers, 256 -> 7, 512 -> 8, 64 -> 5).
@@ -159,6 +165,18 @@ def main(
         for s in [int(x) for x in seeds.split(",") if x.strip()]:
             ov = dict(rfe.CONFIGS[c])
             ov.update(task=task, seed=s, epochs=epochs, nepisodes=int(nepisodes))
+            if groups:
+                ov["groups"] = int(groups)
+            if patch:
+                ov["patch"] = int(patch)
+            if stride:
+                ov["stride"] = int(stride)
+            if pad >= 0:
+                ov["pad"] = int(pad)
+            if sigma_scale:
+                ov["sigma_scale"] = float(sigma_scale)
+            if head:
+                ov["head"] = head
             if limit_train:
                 ov["limit_train"] = int(limit_train)
             cfg = rfe.make_cfg(**ov)

@@ -61,6 +61,15 @@ DEFAULTS = dict(
     chi=4,
     sigma=0.125,  # QKS weight std for 784-dim inputs; scaled by sqrt(784/p) for other input sizes
     head="auto",  # const (paper's fixed 0/1 readout, <=10 classes) | linear (trainable logits) | auto
+    # LeNet-style encoder (qks_tn_lenet.PatchQKSEncodingLayer); leaves = positions x groups
+    encoder="dense",  # dense (paper's QKS) | patch (local, position-shared filters)
+    patch=None,  # receptive field (default per image size: 7 for 28x28, 4 for 32x32)
+    stride=None,  # default 3 for 28x28, 4 for 32x32 -> 8x8 positions
+    pad=None,  # symmetric zero padding (default 0)
+    groups=1,  # channel groups (chi=4 registers) per position
+    leaf_order="morton",  # morton (quadtree merges) | raster
+    share_positions=True,  # False = locally connected control (separate filters per position)
+    sigma_scale=1.0,  # multiplier on the dimensional sigma rule for the patch encoder
     shuffle_buffer=None,  # index-shuffle buffer; None = full permutation every epoch (indices only, cheap)
     lr=1e-3,
     wd=4e-4,
@@ -86,6 +95,17 @@ CONFIGS = {
     "C2top2": dict(mode="B", share_per_layer=True, ff_layers="4,5"),
     "C2c": dict(mode="B", share_per_layer=True, ff_features="centered"),
     "C0old": dict(mode="baseline", share_per_layer=True, impl="old", fast_qks=False),
+    # LeNet-style: patch-local position-shared kitchen sinks, Morton (quadtree) leaf order
+    "L0": dict(encoder="patch", leaf_order="morton", mode="baseline", share_per_layer=True),
+    "L1": dict(encoder="patch", leaf_order="morton", mode="baseline", share_per_layer=False),
+    "L2": dict(encoder="patch", leaf_order="morton", mode="B", share_per_layer=True),
+    "L4": dict(encoder="patch", leaf_order="morton", mode="B", share_per_layer=False),
+    # controls: raster leaf order (same weights, no 2-D locality in the tree) ...
+    "R1": dict(encoder="patch", leaf_order="raster", mode="baseline", share_per_layer=False),
+    "R4": dict(encoder="patch", leaf_order="raster", mode="B", share_per_layer=False),
+    # ... and locally connected filters (same receptive fields, no weight sharing)
+    "U1": dict(encoder="patch", leaf_order="morton", share_positions=False, mode="baseline", share_per_layer=False),
+    "U4": dict(encoder="patch", leaf_order="morton", share_positions=False, mode="B", share_per_layer=False),
 }
 
 
@@ -106,8 +126,19 @@ def make_cfg(**overrides) -> dict:
             parts.append("frozenqks")
         if cfg["impl"] != "new":
             parts.append(cfg["impl"])
-        if int(cfg["nepisodes"]) != 128:
+        if cfg["encoder"] == "patch":
+            geo = patch_geometry(cfg)
+            parts.append(f"patch{geo['patch']}s{geo['stride']}" + (f"p{geo['pad']}" if geo["pad"] else ""))
+            parts.append(f"g{cfg['groups']}")
+            parts.append(cfg["leaf_order"])
+            if not cfg["share_positions"]:
+                parts.append("unshared")
+            if float(cfg["sigma_scale"]) != 1.0:
+                parts.append(f"sig{cfg['sigma_scale']}")
+        elif int(cfg["nepisodes"]) != 128:
             parts.append(f"n{cfg['nepisodes']}")  # 128 episodes = 6 tree layers, 256 = 7, 512 = 8
+        if cfg.get("head") not in (None, "auto"):
+            parts.append(f"head-{cfg['head']}")
         parts.append(f"s{cfg['seed']}")
         cfg["name"] = "_".join(parts)
     return cfg
@@ -125,6 +156,18 @@ def _parse_layers(v):
 # Data
 # --------------------------------------------------------------------------------------
 N_CLASSES = {"binary": 2, "multiclass": 10, "cifar10": 10, "imagenet32": 1000}
+IMAGE_SHAPES = {"binary": (28, 28, 1), "multiclass": (28, 28, 1), "cifar10": (32, 32, 3), "imagenet32": (32, 32, 3)}
+PATCH_DEFAULTS = {(28, 28): dict(patch=7, stride=3, pad=0), (32, 32): dict(patch=4, stride=4, pad=0)}
+
+
+def patch_geometry(cfg: dict) -> dict:
+    """Resolved (patch, stride, pad) for the patch encoder on cfg['task']."""
+    H, W, C = IMAGE_SHAPES[cfg["task"]]
+    geo = dict(PATCH_DEFAULTS[(H, W)])
+    for k in ("patch", "stride", "pad"):
+        if cfg.get(k) is not None:
+            geo[k] = int(cfg[k])
+    return geo
 HF_IMAGENET32 = "benjamin-paine/imagenet-1k-32x32"  # ImageNet-1k, centre-crop + Lanczos to 32x32
 
 
@@ -258,12 +301,34 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
     head_kind = cfg.get("head", "auto")
     if head_kind == "auto":
         head_kind = "const" if n_classes <= 10 else "linear"
-    nlayers = int(np.log2(cfg["nepisodes"] / np.log2(cfg["chi"])))
     tf.keras.utils.set_random_seed(int(cfg["seed"]))
-    if cfg["fast_qks"]:
-        qks = ff.FastFeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
+    encoder_info = {}
+    if cfg.get("encoder", "dense") == "patch":
+        import qks_tn_lenet as ln
+
+        H, W, C = IMAGE_SHAPES[cfg["task"]]
+        if p != H * W * C:
+            raise ValueError(f"input dim {p} != {H}x{W}x{C}")
+        geo = patch_geometry(cfg)
+        sigma = float(cfg["sigma"]) * float(np.sqrt(784.0 / (geo["patch"] ** 2 * C))) * float(cfg["sigma_scale"])
+        qks = ln.PatchQKSEncodingLayer(
+            (H, W, C),
+            sigma=sigma,
+            groups=int(cfg["groups"]),
+            share_positions=bool(cfg["share_positions"]),
+            leaf_order=cfg["leaf_order"],
+            **geo,
+        )
+        nlayers = qks.nlayers
+        encoder_info = dict(encoder="patch", grid=list(qks.grid), leaves=qks.n_leaves, **geo, groups=int(cfg["groups"]),
+                            leaf_order=cfg["leaf_order"], share_positions=bool(cfg["share_positions"]))
     else:
-        qks = ff.FeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
+        nlayers = int(np.log2(cfg["nepisodes"] / np.log2(cfg["chi"])))
+        if cfg["fast_qks"]:
+            qks = ff.FastFeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
+        else:
+            qks = ff.FeatureEncodingLayer(cfg["nepisodes"], cfg["chi"], p, sigma)
+        encoder_info = dict(encoder="dense", leaves=cfg["nepisodes"] // 2)
 
     if cfg["impl"] == "old":
         if cfg["mode"] != "baseline":
@@ -328,6 +393,8 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         n_classes=int(n_classes),
         sigma=float(sigma),
         head_kind=head_kind,
+        nlayers=int(nlayers),
+        **encoder_info,
     )
     return model, qks, tn_layer, counts
 
@@ -574,6 +641,14 @@ def build_parser():
     ap.add_argument("--no-share-per-layer", dest="share_per_layer", action="store_false")
     ap.add_argument("--seed", type=int)
     ap.add_argument("--nepisodes", type=int, help="QKS episodes = tree leaves x 2; 128 -> 6 layers, 256 -> 7, 512 -> 8")
+    ap.add_argument("--encoder", choices=["dense", "patch"])
+    ap.add_argument("--patch", type=int)
+    ap.add_argument("--stride", type=int)
+    ap.add_argument("--pad", type=int)
+    ap.add_argument("--groups", type=int)
+    ap.add_argument("--leaf-order", dest="leaf_order", choices=["morton", "raster"])
+    ap.add_argument("--no-share-positions", dest="share_positions", action="store_false", default=None)
+    ap.add_argument("--sigma-scale", dest="sigma_scale", type=float)
     ap.add_argument("--ff-layers", dest="ff_layers", help="comma-separated layers receiving feedforward, e.g. 4,5")
     ap.add_argument("--ff-features", dest="ff_features", choices=["raw", "centered"])
     ap.add_argument("--ff-null", dest="ff_null", choices=["none", "constant", "shuffle"])
