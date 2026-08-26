@@ -11,7 +11,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
 
 ## Queue
 
-- [~] **A. Collect `lenet-v2-*`** — overlapping receptive fields (CIFAR 11×11/s3, MNIST 9×9/s3/p1) and
+- [x] **A. Collect `lenet-v2-*`** (CIFAR done; MNIST-overlap 3/6) — overlapping receptive fields (CIFAR 11×11/s3, MNIST 9×9/s3/p1) and
   G=2 feature maps, configs L1/L4 × 3 seeds. Launched 21:34. Analyse vs `lenet-v1` (CIFAR L1 0.3906,
   L4 0.4552; MNIST L1 0.8809, L4 0.9759).
 - [~] **B. Collect `imagenet32-L5`** — 4 jobs, 15 epochs, dense encoder, 1000-way linear head.
@@ -49,3 +49,12 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   non-overlapping 4x4/stride 4 default (0.3906 / 0.4552). Feedforward gain is unchanged (+6.6 +/- 0.5 pp).
   So receptive-field size is not a lever either; the encoder really is saturated at chi = 4. Drops the
   "overlapping patches" item from the expressivity list -- what is left is bond dimension and depth.
+- 22:40 **G = 2 feature maps IS a lever (CIFAR, item A).** Two chi=4 registers per position (128 leaves,
+  7 layers, 196 encoder params): L1 0.4043 +/- 0.0015 and **L4 0.4737 +/- 0.0013** vs G=1's 0.3906 / 0.4552
+  -- **+1.85 pp on the best model**, +++ on every seed, for ~1.25x the step cost (26 vs 21 ms/step).
+  Contrast with the overlapping-patch null: what helps is *more registers*, not a bigger receptive field
+  or more encoder parameters. Launched G = 4 (256 leaves, 8 layers) on CIFAR to see if it keeps going.
+- 22:40 **`ff-v2-L6` complete (63 epochs, depth 6, 3 seeds):** C0 0.9711 +/- 0.0014, C1 0.9720 +/- 0.0015,
+  C2 0.9809 +/- 0.0009, **C4 0.9859 +/- 0.0003**. Every ff-v1 ordering survives 4x longer training:
+  C2-C0 = +0.98 +/- 0.21 pp, C4-C1 = +1.39 +/- 0.18 pp (both +++ , McNemar p <= 3e-6); per-vertex
+  unitaries alone remain worthless (C1-C0 = +0.08 +/- 0.08 pp, n.s. on all three seeds).

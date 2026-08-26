@@ -124,7 +124,7 @@ with longer training and a deeper tree.
 | depth | C0 baseline | C1 per-vertex baseline | C2 shared B | C4 per-vertex B |
 |---|---|---|---|---|
 | 6 layers (128 episodes), 15 ep (`ff-v1`) | 0.9682 ± 0.0017 | 0.9671 ± 0.0015 | 0.9736 ± 0.0018 | 0.9820 ± 0.0003 |
-| 6 layers, 63 ep | 0.969–0.974 | 0.969–0.974 | 0.980–0.983 | **0.9856–0.9864** |
+| 6 layers, 63 ep | 0.9711 ± 0.0014 | 0.9720 ± 0.0015 | 0.9809 ± 0.0009 | **0.9859 ± 0.0003** |
 | 7 layers (256 episodes), 63 ep | 0.9782 ± 0.0013 | 0.9784 ± 0.0004 | 0.9841 ± 0.0005 | **0.9871 ± 0.0004** |
 
 Four times longer training adds ~0.3 pp to the baselines and ~0.4–0.9 pp to the feedforward models;
@@ -239,6 +239,18 @@ Paired per-seed differences (all "+++"/"−−−" = same sign on every seed):
    when the features are weak.
 6. **The fixed 16→10 readout beats a trainable linear head** (−8.5 pp on CIFAR). Capacity is not the
    constraint at the readout; keeping the outputs as normalised probabilities is.
+
+### Follow-ups (`lenet-v2-*`, CIFAR-10, 3 seeds)
+
+| change | L1 (no feedforward) | L4 (feedforward B) |
+|---|---|---|
+| baseline: 4×4/stride 4, G=1 | 0.3906 ± 0.0027 | 0.4552 ± 0.0042 |
+| overlapping 11×11/stride 3 | 0.3835 ± 0.0024 | 0.4496 ± 0.0023 (**null**) |
+| **G = 2 feature maps** (128 leaves, 7 layers) | 0.4043 ± 0.0015 | **0.4737 ± 0.0013** (+1.85 pp) |
+
+A bigger receptive field does nothing; a second register per position helps on every seed. Together with
+the weight-sharing and leaf-ordering nulls this says the model is limited by *how much quantum state it
+carries* (registers per position, bond dimension), not by how it reads the image.
 
 ## Not yet done
 
