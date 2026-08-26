@@ -169,6 +169,20 @@ classes out of 16 (or 64) root probabilities is the wrong shape of problem: **th
 10-class-scale method**, and scaling it needs a wider readout (chi ≥ 32, parallel trees, or a structured
 class code), not more tree capacity.
 
+### Beyond chi = 8
+
+The dense Hermitian basis `(K, d, d)` is what caps the bond dimension in practice: 0.13 GB at chi = 8 but
+**34 GB at chi = 16**. `params_to_hermitian_scatter` builds the generator by scattering parameters
+straight into the matrix instead (identical numerics, selected automatically above chi = 8), which lifts
+the ceiling. First CIFAR-10 data point for the shared-unitary patch baseline without feedforward:
+
+| chi | outcomes | TN params | test acc | ms/step (L40S) |
+|---|---|---|---|---|
+| 4 | 16 | 1,530 | 0.3277 ± 0.0042 | 13 |
+| 16 | 256 | 393,210 | 0.4240 (1 seed) | 84 |
+
+Bond dimension has not saturated.
+
 ## Checkpointing and training for more epochs
 
 Every run writes a `tf.train.Checkpoint` (model weights, AdamW moments and the optimizer step counter that

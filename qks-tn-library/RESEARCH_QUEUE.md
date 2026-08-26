@@ -156,6 +156,13 @@ times: the night's work began ~21:30 PDT 2026-08-25 and this correction was made
   1.28 M images for 7 epochs is under-trained, not over-capacity (its training accuracy was still rising
   at 0.0031). Nothing to conclude beyond the scope statement already recorded: ImageNet-32 is
   readout-bound for this ansatz and is not a productive target without a much wider readout.
+- **[19]** **chi = 16 unblocked and running.** The dense Hermitian basis is (K, d, d): 0.13 GB at chi=8
+  but **34 GB at chi=16**, which is why chi=8 was the practical ceiling. Replaced by a scatter-based
+  construction (`params_to_hermitian_scatter`, auto-selected above chi=8, numerically identical to the
+  basis version and covered by a test). First data point, CIFAR L0 (patch, shared unitaries, no
+  feedforward), 1 seed: **chi=4 0.3277 -> chi=16 0.4240** (84 ms/step, 393,210 TN params, 256-outcome
+  readout). The bond-dimension lever has still not saturated. The mode-B arm at chi=16 runs at
+  447 ms/step (~3 h) and is in progress.
 
 ---
 
@@ -207,7 +214,9 @@ On CIFAR-10, three independent changes to the published model compound:
   from a ragged final batch), and per-epoch + per-annealing-cycle checkpointing was added.
 
 ## Suggested next steps
-1. **chi = 16** on CIFAR (256 outcomes, ~65k params/unitary) -- the one lever that has not yet saturated.
+1. **chi = 16** -- unblocked tonight (scatter Hermitian) and confirmed still improving: the shared-unitary
+   baseline goes 0.3277 (chi=4) -> 0.4240 (chi=16) on CIFAR. Worth a proper 3-seed sweep, and chi=32 needs
+   only the same scatter path (though 1 M parameters per unitary makes it a different kind of model).
 2. Longer training (63 epochs) of the best chi=8 configuration; at 15 epochs it was still improving.
 3. A wider readout for many-class problems (parallel trees concatenated, or a structured class code) if
    ImageNet-scale is wanted at all.
