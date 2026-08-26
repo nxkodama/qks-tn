@@ -52,6 +52,7 @@ __all__ = [
     "hermitian_basis",
     "random_hermitian_params",
     "params_to_hermitian",
+    "params_to_hermitian_scatter",
     "sample_shots",
     "FastFeatureEncodingLayer",
     "FeedforwardTNLayer",
@@ -114,6 +115,44 @@ def params_to_hermitian(params: tf.Tensor, basis: tf.Tensor) -> tf.Tensor:
     # tf.complex (not tf.cast) so the backward pass takes the real part silently
     params_c = tf.complex(params, tf.zeros_like(params))
     return tf.tensordot(params_c, basis, axes=[[0], [0]])
+
+
+_SCATTER_IDX = {}
+
+
+def _scatter_indices(d: int):
+    """Cached flat scatter indices for the traceless-Hermitian parametrisation."""
+    if d not in _SCATTER_IDX:
+        rows, cols = np.triu_indices(d, 1)
+        up, lo = rows * d + cols, cols * d + rows
+        diag = np.arange(d - 1) * (d + 1)
+        _SCATTER_IDX[d] = (
+            np.concatenate([up, lo])[:, None].astype(np.int32),
+            np.concatenate([diag, [d * d - 1]])[:, None].astype(np.int32),
+        )
+    return _SCATTER_IDX[d]
+
+
+def params_to_hermitian_scatter(params: tf.Tensor, d: int) -> tf.Tensor:
+    """Same map as :func:`params_to_hermitian` without materialising the (K, d, d) basis.
+
+    The dense basis costs ``K * d^2`` complex entries -- 0.13 GB at chi = 8 but **34 GB** at
+    chi = 16 -- so beyond chi = 8 the parameters must be scattered straight into the matrix.
+    Numerically identical to the basis version (verified in the tests).
+    """
+    n = d * (d - 1) // 2
+    off_idx, diag_idx = _scatter_indices(d)
+    p_re, p_im, p_d = params[:n], params[n : 2 * n], params[2 * n :]
+    rest = tf.shape(params)[1:]
+    out_shape = tf.concat([[d * d], rest], 0)
+    real = tf.scatter_nd(off_idx, tf.concat([p_re, p_re], 0), out_shape)
+    last = -tf.reduce_sum(p_d, axis=0, keepdims=True)
+    real += tf.scatter_nd(diag_idx, tf.concat([p_d, last], 0), out_shape)
+    imag = tf.scatter_nd(off_idx, tf.concat([p_im, -p_im], 0), out_shape)
+    H = tf.complex(real, imag)  # (d*d, ...)
+    rank = len(params.shape)
+    H = tf.transpose(H, list(range(1, rank)) + [0])
+    return tf.reshape(H, tf.concat([rest, [d, d]], 0))
 
 
 def _expm_i(H: tf.Tensor) -> tf.Tensor:
@@ -309,7 +348,9 @@ class FeedforwardTNLayer(tf.keras.layers.Layer):
             off += 1 if self.share_per_layer else self.n_vertices[l]
         self._n_ff_units = off
 
-        self.basis = tf.constant(hermitian_basis(self.d))
+        # the dense basis is (K, d, d): fine to chi = 8 (0.13 GB), 34 GB at chi = 16
+        self.use_scatter = self.d > 64
+        self.basis = None if self.use_scatter else tf.constant(hermitian_basis(self.d))
 
         n_units = self.nlayers if self.share_per_layer else 2**self.nlayers - 1
         if init_params0 is None:
@@ -355,6 +396,11 @@ class FeedforwardTNLayer(tf.keras.layers.Layer):
         off = self._ff_offsets[l]
         return slice(off, off + (1 if self.share_per_layer else self.n_vertices[l]))
 
+    def _hermitian(self, params):
+        if self.use_scatter:
+            return params_to_hermitian_scatter(params, self.d)
+        return params_to_hermitian(params, self.basis)
+
     # ---- unitaries --------------------------------------------------------------------
     def build_unitaries(self, l: int, ff_input=None, training=None) -> tf.Tensor:
         """Unitaries of layer ``l``.
@@ -363,7 +409,7 @@ class FeedforwardTNLayer(tf.keras.layers.Layer):
         mode B when ``ff_input`` (B, n, 2 chi) is given, and ``(1|n, chi**2, d, d)`` in
         mode A for conditioned layers.
         """
-        H0 = params_to_hermitian(self.params0[:, self._unit_slice(l)], self.basis)  # (1|n, d, d)
+        H0 = self._hermitian(self.params0[:, self._unit_slice(l)])  # (1|n, d, d)
         if self.mode == "B" and l in self.ff_layers and ff_input is not None:
             f = ff_input
             if self.ff_null == "constant":
@@ -374,14 +420,14 @@ class FeedforwardTNLayer(tf.keras.layers.Layer):
             if self.ff_features == "centered":
                 f = f - 1.0 / self.chi
             f = tf.complex(f, tf.zeros_like(f))
-            Hk = params_to_hermitian(self.params_ff[:, self._ff_slice(l), :], self.basis)  # (1|n, 2chi, d, d)
+            Hk = self._hermitian(self.params_ff[:, self._ff_slice(l), :])  # (1|n, 2chi, d, d)
             if self.share_per_layer:
                 H = H0[tf.newaxis] + tf.einsum("nvk,kab->nvab", f, Hk[0])
             else:
                 H = H0[tf.newaxis] + tf.einsum("nvk,vkab->nvab", f, Hk)
             return _expm_i(H)  # (B, n, d, d)
         if self.mode == "A" and l in self.ff_layers:
-            dH = params_to_hermitian(self.params_ffA[:, self._ff_slice(l), :], self.basis)  # (1|n, chi², d, d)
+            dH = self._hermitian(self.params_ffA[:, self._ff_slice(l), :])  # (1|n, chi², d, d)
             return _expm_i(H0[:, tf.newaxis] + dH)
         return _expm_i(H0)
 

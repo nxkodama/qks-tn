@@ -235,6 +235,27 @@ def test_k_chi8_model_builds_and_trains():
         assert np.all(np.isfinite(h.history["loss"]))
 
 
+def test_l_scatter_hermitian_matches_basis_and_enables_chi16():
+    """The scatter construction equals the dense-basis one and lifts the chi <= 8 memory limit."""
+    for d in (16, 64):
+        K = d * d - 1
+        for shape in ((K, 3), (K, 2, 5)):
+            p = tf.constant(np.random.default_rng(0).normal(size=shape).astype("float32"))
+            a = ff.params_to_hermitian(p, tf.constant(ff.hermitian_basis(d))).numpy()
+            b = ff.params_to_hermitian_scatter(p, d).numpy()
+            assert _maxabs(a, b) < 1e-5, (d, shape, _maxabs(a, b))
+            assert _maxabs(b, np.conj(np.swapaxes(b, -1, -2))) < 1e-6  # Hermitian
+            assert np.max(np.abs(np.trace(b, axis1=-2, axis2=-1))) < 1e-5  # traceless
+    # chi = 16 would need a 34 GB dense basis; the layer must take the scatter path
+    layer = ff.FeedforwardTNLayer(16, 6, mode="baseline", share_per_layer=True, seed=0)
+    assert layer.use_scatter and layer.basis is None
+    assert not ff.FeedforwardTNLayer(8, 6).use_scatter
+    enc = ff.FastFeatureEncodingLayer(256, 16, 784, 0.125)
+    out = layer(enc(tf.random.uniform((4, 784)))).numpy()
+    assert out.shape == (4, 256) and np.max(np.abs(out.sum(-1) - 1)) < 1e-4
+    assert layer.count_params() == 6 * (256 * 256 - 1)
+
+
 # ---------------------------------------------------------------------------------------
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
