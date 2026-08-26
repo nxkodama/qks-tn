@@ -31,7 +31,7 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   into the batch, run a 2-layer stage-1 tree, read its 16 classical probabilities per block, re-encode
   with a second patch-QKS on the 4×4×16 field, second tree, head. Implement only if time remains after
   C/D; helpers `fold_blocks`/`unfold_blocks` were specified but not written.
-- [ ] **F. Ablations still unrun from ff-v1**: finite shots (`C2s16/128/1024`), `--ff-layers 5` and `4,5`,
+- [~] **F. Ablations** (`shots-mnist` launched 01:05: C2s16/128/1024 x 3 seeds): finite shots (`C2s16/128/1024`), `--ff-layers 5` and `4,5`,
   centred features (`C2c`). Cheap (~15 min/job); run on MNIST if GPU capacity is idle.
 - [ ] **G. Housekeeping** — keep `FEEDFORWARD.md` current; final summary of the night at the end.
 
@@ -94,3 +94,14 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   For comparison chi=8 with G=1 reaches 0.5290 at 36 ms/step -- **widening the registers beats adding
   more of them**, which is the same message as every other null tonight: what matters is how much
   quantum state each vertex carries, not how many classical features feed it.
+- 01:05 **ImageNet-32 is not separating (both chi = 4 and chi = 8).** chi=4 at epoch 10-13:
+  baseline 0.38 %, feedforward-B 0.19 % val acc; chi=8 at epoch 2: 0.19-0.26 %. Everything is within a
+  few multiples of the 0.1 % chance rate and the configs are not ordered. Reading: 1000 classes through
+  a 16- (or 64-) dimensional readout with a *linear* head is the binding constraint, and it is far more
+  binding than anything the tree does -- consistent with the CIFAR finding that the fixed readout beats
+  a trainable linear head. Report as a negative result; a real ImageNet attempt needs a much wider
+  readout (chi >= 32, or several parallel trees concatenated), not more tree capacity.
+- 01:05 **Two-stage "deep kitchen sinks" (partial: T1 3 seeds, T4 1 seed):** T1 0.3822 +/- 0.0024,
+  T4 0.4420 vs the single-tree L1 0.3906 / L4 0.4552. The classical hand-off does *not* beat simply
+  contracting one deeper tree, though it is far more parameter-efficient (20,910 TN params vs 79,305).
+  Feedforward still helps inside it (+5.5 pp). Full numbers when the last two seeds land.
