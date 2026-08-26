@@ -271,6 +271,7 @@ Paired per-seed differences (all "+++"/"−−−" = same sign on every seed):
 | baseline: 4×4/stride 4, G=1 | 0.3906 ± 0.0027 | 0.4552 ± 0.0042 |
 | overlapping 11×11/stride 3 | 0.3835 ± 0.0024 | 0.4496 ± 0.0023 (**null**) |
 | **G = 2 feature maps** (128 leaves, 7 layers) | 0.4043 ± 0.0015 | **0.4737 ± 0.0013** (+1.85 pp) |
+| G = 4 feature maps (256 leaves, 8 layers) | 0.4093 ± 0.0039 | 0.4798 ± 0.0018 (+0.61 pp more) |
 
 A bigger receptive field does nothing; a second register per position helps on every seed. Together with
 the weight-sharing and leaf-ordering nulls this says the model is limited by *how much quantum state it

@@ -89,3 +89,8 @@ Cost guide (T4 $0.59/h): a 15-epoch MNIST/CIFAR job is 6–15 min ≈ $0.10; kee
   n.s. on all seeds) with **150 encoder parameters vs 150,720** -- locality stops being a handicap once
   the registers are wide enough; (ii) feedforward is still worth +4.97 +/- 0.20 pp with the patch encoder.
   MNIST is now clearly saturating (98.8 %), so CIFAR-10 and ImageNet-32 are the discriminating tasks.
+- 00:40 **Feature maps saturate at G = 2 (CIFAR, L4):** G=1 0.4552 -> G=2 0.4737 (+1.85 pp) ->
+  G=4 0.4798 +/- 0.0018 (+0.61 pp for 1.5x the step cost, 39 vs 26 ms/step). Diminishing returns.
+  For comparison chi=8 with G=1 reaches 0.5290 at 36 ms/step -- **widening the registers beats adding
+  more of them**, which is the same message as every other null tonight: what matters is how much
+  quantum state each vertex carries, not how many classical features feed it.
