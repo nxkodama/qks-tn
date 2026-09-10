@@ -233,6 +233,12 @@ with longer training and a deeper tree.
 | 6 layers, 63 ep | 0.9711 ± 0.0014 | 0.9720 ± 0.0015 | 0.9809 ± 0.0009 | **0.9859 ± 0.0003** |
 | 7 layers (256 episodes), 63 ep | 0.9782 ± 0.0013 | 0.9784 ± 0.0004 | 0.9841 ± 0.0005 | **0.9871 ± 0.0004** |
 
+![63-epoch training and validation curves, depth 6](img/ff-v2-L6_curves_trainable_QKS.png)
+
+*The 63-epoch curves (four annealing cycles; restarts visible at epochs 16 and 32). The feedforward
+models recover from each warm restart faster and to a lower loss, while the baselines flatten after
+epoch ~20 — longer training widens the feedforward gap rather than closing it.*
+
 Four times longer training adds ~0.3 pp to the baselines and ~0.4–0.9 pp to the feedforward models;
 a deeper tree lifts everything by ~1 pp; the ordering is unchanged and every paired comparison
 (C2 − C0, C4 − C1) is positive on all seeds with McNemar p ≤ 3·10⁻⁵ (depth 7). Per-vertex unitaries
