@@ -244,7 +244,7 @@ two feedforward variants, "shared"/"per-node" the gate sharing):
 epochs 16, 32 and 64). Lines are means over 3 seeds; bands are 95% confidence intervals (t-interval).
 The feedforward models recover from each restart faster and to a lower loss, while the baseline flattens
 after epoch ~20 — longer training widens the feedforward gap rather than closing it, and single-shot
-feedforward sits cleanly between the two.*
+feedforward sits cleanly between the two. All three models use per-node gates.*
 
 Longer training helps the feedforward models far more than the baselines: from 15 to 127 epochs the
 baselines gain ~0.3–0.6 pp while statistics feedforward gains ~0.5–0.9 pp, so the paired gap *widens*

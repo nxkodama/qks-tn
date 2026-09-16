@@ -70,19 +70,19 @@ LABEL = {
     # Plain-language scheme: [encoder] - [feedforward] - [gate sharing].
     # "shared gates" = one unitary reused by every node of a tree layer (the paper's setting);
     # "per-node gates" = each tree node has its own unitary.
-    # "feedforward (statistics)" = measured outcome statistics of the discarded register set the
+    # "feedforward (multishot)" = measured outcome statistics of the discarded register set the
     # next gate's parameters (the design note's multishot Case B);
     # "feedforward (single-shot)" = the gate is conditioned on the measured outcome itself (Case A).
     "C0": "no feedforward, shared gates",
     "C1": "no feedforward, per-node gates",
-    "C2": "feedforward (statistics), shared gates",
+    "C2": "feedforward (multishot), shared gates",
     "C3": "feedforward control: constant input",
-    "C4": "feedforward (statistics), per-node gates",
+    "C4": "feedforward (multishot), per-node gates",
     "C5": "feedforward (single-shot), shared gates",
     "C6": "feedforward (single-shot), per-node gates",
     "C0old": "original implementation",
     "F0": "no feedforward, shared gates",
-    "F2": "feedforward (statistics), shared gates",
+    "F2": "feedforward (multishot), shared gates",
     "F5": "feedforward (single-shot), shared gates",
     "C2c": "feedforward, centred statistics",
     "C2s16": "feedforward from 16 measurements",
@@ -102,6 +102,14 @@ LABEL = {
     "T4": "two-stage, feedforward",
     "L4lin": "local filters, feedforward, trainable output layer",
     "C4lin": "feedforward, trainable output layer",
+}
+# every line in the per-node facet is a per-node-gate model, so the qualifier is dropped there
+FACET_LABELS = {
+    "per-node gates": {
+        "C1": "no feedforward",
+        "C6": "feedforward (single-shot)",
+        "C4": "feedforward (multishot)",
+    }
 }
 _MATCH_KEYS = ["mode", "share_per_layer", "ff_null", "shots", "ff_layers", "ff_features", "freeze_qks", "impl",
                "encoder", "leaf_order", "share_positions", "head", "nepisodes"]
@@ -234,6 +242,9 @@ def plot_curves(groups, out_prefix, facet_name, configs):
     # magma sampled over the configs in facet order (clipped away from the near-white end)
     cmap = plt.get_cmap("magma")
     facet_colors = {c: cmap(x) for c, x in zip(configs, np.linspace(0.12, 0.75, max(len(configs), 2)))}
+    # facet-specific label overrides (drop qualifiers shared by every line in the facet)
+    facet_labels = FACET_LABELS.get(facet_name, {})
+    label = lambda c: facet_labels.get(c, LABEL.get(c, c))  # noqa: E731
     fig, axes = plt.subplots(2, 2, figsize=(11, 7.5), facecolor=surface, sharex=True)
     panels = [
         (axes[0, 0], "loss", "training loss (CE)"),
@@ -261,7 +272,7 @@ def plot_curves(groups, out_prefix, facet_name, configs):
                     sem = arr.std(axis=0, ddof=1) / np.sqrt(arr.shape[0])
                     tcrit = float(_st.t.ppf(0.975, arr.shape[0] - 1))
                     ax.fill_between(epochs, mean - tcrit * sem, mean + tcrit * sem, color=color, alpha=0.18, lw=0)
-                (h,) = ax.plot(epochs, mean, color=color, lw=2.0, label=LABEL.get(c, c))
+                (h,) = ax.plot(epochs, mean, color=color, lw=2.0, label=label(c))
                 handles[c] = h
         ax.set_title(title, loc="left", fontsize=10, color=ink)
         ax.grid(True, color=grid, lw=0.8)
@@ -281,7 +292,7 @@ def plot_curves(groups, out_prefix, facet_name, configs):
     fig.suptitle(f"QKS+TTN on {dataset} — {facet_name}", x=0.01, ha="left", fontsize=12, color=ink)
     fig.legend(
         [handles[c] for c in configs if c in handles],
-        [LABEL.get(c, c) for c in configs if c in handles],
+        [label(c) for c in configs if c in handles],
         loc="lower center",
         ncol=min(3, len(handles)),
         frameon=False,
