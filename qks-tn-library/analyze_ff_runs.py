@@ -289,7 +289,9 @@ def plot_curves(groups, out_prefix, facet_name, configs):
     tasks = sorted({r["cfg"]["task"] for c in configs for r in groups[c]})
     task_name = {"binary": "(3 vs 5)-MNIST", "multiclass": "MNIST", "cifar10": "CIFAR-10", "imagenet32": "ImageNet-32"}
     dataset = " / ".join(task_name.get(t, t) for t in tasks)
-    fig.suptitle(f"QKS+TTN on {dataset} — {facet_name}", x=0.01, ha="left", fontsize=12, color=ink)
+    depths = sorted({r["params"].get("nlayers") for c in configs for r in groups[c]} - {None})
+    depth_note = f", {depths[0]}-layer tree" if len(depths) == 1 else ""
+    fig.suptitle(f"QKS+TTN on {dataset} — {facet_name}{depth_note}", x=0.01, ha="left", fontsize=12, color=ink)
     fig.legend(
         [handles[c] for c in configs if c in handles],
         [label(c) for c in configs if c in handles],
@@ -338,7 +340,7 @@ def main(argv=None):
         present = [c for c in confs if c in groups]
         if facet in ("ablations", "patch encoder", "two-stage") and len(present) < 1:
             continue
-        if facet == "per-node gates" and len(present) < 3:
+        if facet == "per-node gates" and len(present) < 2:
             continue
         p = plot_curves(groups, prefix + "_curves", facet, confs)
         if p:

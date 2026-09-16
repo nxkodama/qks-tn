@@ -246,6 +246,11 @@ The feedforward models recover from each restart faster and to a lower loss, whi
 after epoch ~20 — longer training widens the feedforward gap rather than closing it, and single-shot
 feedforward sits cleanly between the two. All three models use per-node gates.*
 
+![127-epoch curves, per-node gates, depth 7](img/ff-v2-L7_curves_per_node.png)
+
+*The same comparison on the 7-layer tree (256 episodes; no single-shot arm was run at this depth).
+Multishot feedforward ends at 0.9881 ± 0.0010 vs 0.9789 ± 0.0004 without it.*
+
 Longer training helps the feedforward models far more than the baselines: from 15 to 127 epochs the
 baselines gain ~0.3–0.6 pp while statistics feedforward gains ~0.5–0.9 pp, so the paired gap *widens*
 (shared: +0.54 pp at 15 ep → +1.17 ± 0.26 pp at 127 ep; per-node: +1.35 ± 0.15 pp at 127 ep, all seeds
