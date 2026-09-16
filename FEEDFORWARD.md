@@ -236,7 +236,7 @@ two feedforward variants, "shared"/"per-node" the gate sharing):
 | 6 layers, 63 ep | 0.9711 ± 0.0014 | 0.9720 ± 0.0015 | 0.9809 ± 0.0009 | 0.9859 ± 0.0003 | — | — |
 | 6 layers, 127 ep | 0.9712 ± 0.0014 | 0.9734 ± 0.0011 | 0.9829 ± 0.0014 | 0.9868 ± 0.0003 | 0.9774 ± 0.0002 | 0.9797 ± 0.0005 |
 | 7 layers, 63 ep | 0.9782 ± 0.0013 | 0.9784 ± 0.0004 | 0.9841 ± 0.0005 | 0.9871 ± 0.0004 | — | — |
-| 7 layers, 127 ep | 0.9786 ± 0.0014 | 0.9789 ± 0.0004 | 0.9851 ± 0.0003 | **0.9881 ± 0.0010** | — | — |
+| 7 layers, 127 ep | 0.9786 ± 0.0014 | 0.9789 ± 0.0004 | 0.9851 ± 0.0003 | **0.9881 ± 0.0010** | 0.9811 ± 0.0008 | 0.9834 ± 0.0006 |
 
 ![127-epoch curves, per-node gates](img/ff-v2-L6_curves_per_node.png)
 
@@ -248,15 +248,17 @@ feedforward sits cleanly between the two. All three models use per-node gates.*
 
 ![127-epoch curves, per-node gates, depth 7](img/ff-v2-L7_curves_per_node.png)
 
-*The same comparison on the 7-layer tree (256 episodes; no single-shot arm was run at this depth).
-Multishot feedforward ends at 0.9881 ± 0.0010 vs 0.9789 ± 0.0004 without it.*
+*The same comparison on the 7-layer tree (256 episodes). Multishot feedforward ends at
+0.9881 ± 0.0010 vs 0.9789 ± 0.0004 without it; single-shot feedforward again lands between the two at
+0.9834 ± 0.0006 (+0.45 ± 0.06 pp over its baseline, McNemar-significant on every seed, yet
+0.47 ± 0.16 pp behind multishot).*
 
 Longer training helps the feedforward models far more than the baselines: from 15 to 127 epochs the
 baselines gain ~0.3–0.6 pp while statistics feedforward gains ~0.5–0.9 pp, so the paired gap *widens*
 (shared: +0.54 pp at 15 ep → +1.17 ± 0.26 pp at 127 ep; per-node: +1.35 ± 0.15 pp at 127 ep, all seeds
 positive, McNemar p ≤ 5·10⁻⁸). Single-shot feedforward shows the same pattern at a smaller scale
-(+0.62 ± 0.13 pp over its baseline at 127 ep; per-node beats shared here: 0.9797 vs 0.9774) but stays
-0.7 pp behind statistics feedforward on every seed — consistent with the design note's argument that
+(depth 6: +0.62 ± 0.13 pp over its baseline at 127 ep; depth 7: +0.45 ± 0.06 pp; per-node beats shared
+at both depths) but stays 0.5–0.7 pp behind statistics feedforward on every seed — consistent with the design note's argument that
 single-shot conditioning is only a widened unitary, while statistics feedforward is genuinely nonlinear.
 A deeper tree lifts everything by ~0.5–1 pp; per-node gates without feedforward remain nearly worthless
 (+0.03 ± 0.10 pp at depth 7). The best MNIST number in the dense-encoder family is now
