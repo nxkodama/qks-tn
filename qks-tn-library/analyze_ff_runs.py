@@ -233,6 +233,7 @@ def plot_curves(groups, out_prefix, facet_name, configs):
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
     from scipy import stats as _st
 
     configs = [c for c in configs if c in groups]
@@ -255,6 +256,7 @@ def plot_curves(groups, out_prefix, facet_name, configs):
     handles = {}
     for ax, key, title in panels:
         ax.set_facecolor(surface)
+        mean_lo, mean_hi = np.inf, -np.inf
         for c in configs:
             color = facet_colors[c]
             curves = []
@@ -274,6 +276,7 @@ def plot_curves(groups, out_prefix, facet_name, configs):
                     ax.fill_between(epochs, mean - tcrit * sem, mean + tcrit * sem, color=color, alpha=0.18, lw=0)
                 (h,) = ax.plot(epochs, mean, color=color, lw=2.0, label=label(c))
                 handles[c] = h
+                mean_lo, mean_hi = min(mean_lo, float(mean.min())), max(mean_hi, float(mean.max()))
         ax.set_title(title, loc="left", fontsize=10, color=ink)
         ax.grid(True, color=grid, lw=0.8)
         ax.set_axisbelow(True)
@@ -284,6 +287,14 @@ def plot_curves(groups, out_prefix, facet_name, configs):
         ax.tick_params(colors=ink2, labelsize=8.5)
         if "loss" in key:
             ax.set_yscale("log")
+            if np.isfinite(mean_lo):
+                # limits from the mean curves (a single deep CI dip must not stretch the axis),
+                # ticks at 1-2-5 per decade with plain decimal labels
+                ax.set_ylim(0.8 * mean_lo, 1.15 * mean_hi)
+                ax.yaxis.set_major_locator(mticker.LogLocator(base=10, subs=(1.0, 2.0, 5.0), numticks=12))
+                ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
+                ax.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs=np.arange(2, 10) / 10, numticks=12))
+                ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     for ax in axes[1]:
         ax.set_xlabel("epoch", color=ink2, fontsize=9)
     tasks = sorted({r["cfg"]["task"] for c in configs for r in groups[c]})
