@@ -238,12 +238,13 @@ two feedforward variants, "shared"/"per-node" the gate sharing):
 | 7 layers, 63 ep | 0.9782 ± 0.0013 | 0.9784 ± 0.0004 | 0.9841 ± 0.0005 | 0.9871 ± 0.0004 | — | — |
 | 7 layers, 127 ep | 0.9786 ± 0.0014 | 0.9789 ± 0.0004 | 0.9851 ± 0.0003 | **0.9881 ± 0.0010** | — | — |
 
-![63-epoch training and validation curves, depth 6](img/ff-v2-L6_curves_trainable_QKS.png)
+![127-epoch curves, per-node gates](img/ff-v2-L6_curves_per_node.png)
 
-*The 127-epoch curves (five annealing cycles; warm restarts visible at epochs 16, 32 and 64), now
-including the two single-shot variants. The feedforward models recover from each restart faster and to
-a lower loss, while the baselines flatten after epoch ~20 — longer training widens the feedforward gap
-rather than closing it.*
+*The 127-epoch curves for the per-node-gate models (five annealing cycles; warm restarts visible at
+epochs 16, 32 and 64). Lines are means over 3 seeds; bands are 95% confidence intervals (t-interval).
+The feedforward models recover from each restart faster and to a lower loss, while the baseline flattens
+after epoch ~20 — longer training widens the feedforward gap rather than closing it, and single-shot
+feedforward sits cleanly between the two.*
 
 Longer training helps the feedforward models far more than the baselines: from 15 to 127 epochs the
 baselines gain ~0.3–0.6 pp while statistics feedforward gains ~0.5–0.9 pp, so the paired gap *widens*

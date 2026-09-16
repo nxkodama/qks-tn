@@ -220,15 +220,20 @@ def comparison_table(groups):
 
 
 def plot_curves(groups, out_prefix, facet_name, configs):
+    """Mean curve per configuration with a 95% confidence band across seeds (t-interval)."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from scipy import stats as _st
 
     configs = [c for c in configs if c in groups]
     if not configs:
         return None
     surface, ink, ink2, grid = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e5e1"
+    # magma sampled over the configs in facet order (clipped away from the near-white end)
+    cmap = plt.get_cmap("magma")
+    facet_colors = {c: cmap(x) for c, x in zip(configs, np.linspace(0.12, 0.75, max(len(configs), 2)))}
     fig, axes = plt.subplots(2, 2, figsize=(11, 7.5), facecolor=surface, sharex=True)
     panels = [
         (axes[0, 0], "loss", "training loss (CE)"),
@@ -240,19 +245,23 @@ def plot_curves(groups, out_prefix, facet_name, configs):
     for ax, key, title in panels:
         ax.set_facecolor(surface)
         for c in configs:
-            color = PALETTE[SLOT.get(c, 7) % len(PALETTE)]
+            color = facet_colors[c]
             curves = []
             for r in groups[c]:
                 ep = [h["epoch"] for h in r["epochs"] if h.get(key) is not None]
                 v = [h[key] for h in r["epochs"] if h.get(key) is not None]
-                if not v:
-                    continue
-                curves.append((ep, v))
-                ax.plot(ep, v, color=color, lw=0.9, alpha=0.35)
+                if v:
+                    curves.append((ep, v))
             if curves:
                 n = min(len(v) for _, v in curves)
-                mean = np.mean([v[:n] for _, v in curves], axis=0)
-                (h,) = ax.plot(curves[0][0][:n], mean, color=color, lw=2.0, label=LABEL.get(c, c))
+                arr = np.asarray([v[:n] for _, v in curves], dtype=float)
+                epochs = curves[0][0][:n]
+                mean = arr.mean(axis=0)
+                if arr.shape[0] > 1:
+                    sem = arr.std(axis=0, ddof=1) / np.sqrt(arr.shape[0])
+                    tcrit = float(_st.t.ppf(0.975, arr.shape[0] - 1))
+                    ax.fill_between(epochs, mean - tcrit * sem, mean + tcrit * sem, color=color, alpha=0.18, lw=0)
+                (h,) = ax.plot(epochs, mean, color=color, lw=2.0, label=LABEL.get(c, c))
                 handles[c] = h
         ax.set_title(title, loc="left", fontsize=10, color=ink)
         ax.grid(True, color=grid, lw=0.8)
@@ -308,6 +317,7 @@ def main(argv=None):
     prefix = os.path.join(d, f"{tag}")
     figs = []
     for facet, confs in [
+        ("per-node gates", ["C1", "C6", "C4"]),
         ("trainable QKS", ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C0old"]),
         ("frozen QKS", ["F0", "F2", "F5"]),
         ("patch encoder", ["L0", "L1", "L2", "L4", "R1", "R4", "U1", "U4", "L4lin"]),
@@ -316,6 +326,8 @@ def main(argv=None):
     ]:
         present = [c for c in confs if c in groups]
         if facet in ("ablations", "patch encoder", "two-stage") and len(present) < 1:
+            continue
+        if facet == "per-node gates" and len(present) < 3:
             continue
         p = plot_curves(groups, prefix + "_curves", facet, confs)
         if p:
