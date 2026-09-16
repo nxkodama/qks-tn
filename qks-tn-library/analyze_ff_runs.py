@@ -285,6 +285,9 @@ def plot_curves(groups, out_prefix, facet_name, configs):
         for side in ("left", "bottom"):
             ax.spines[side].set_color(grid)
         ax.tick_params(colors=ink2, labelsize=8.5)
+        if "acc" in key:
+            lo, hi = ax.get_ylim()
+            ax.set_ylim(lo, min(hi, 1.0))  # accuracy cannot exceed 1; don't let CI bands imply it
         if "loss" in key:
             ax.set_yscale("log")
             if np.isfinite(mean_lo):
