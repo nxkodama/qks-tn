@@ -287,7 +287,13 @@ def plot_curves(groups, out_prefix, facet_name, configs):
         ax.tick_params(colors=ink2, labelsize=8.5)
         if "acc" in key:
             lo, hi = ax.get_ylim()
-            ax.set_ylim(lo, min(hi, 1.0))  # accuracy cannot exceed 1; don't let CI bands imply it
+            hi = min(hi, 1.0)
+            ax.set_ylim(lo, hi)  # accuracy cannot exceed 1; don't let CI bands imply it
+            # ticks every 0.01 (0.95, 0.97, 0.99, ... visible); coarser when the span is wide
+            span = hi - lo
+            step = 0.01 if span <= 0.2 else (0.02 if span <= 0.4 else 0.05)
+            ax.yaxis.set_major_locator(mticker.MultipleLocator(step))
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
         if "loss" in key:
             ax.set_yscale("log")
             if np.isfinite(mean_lo):
