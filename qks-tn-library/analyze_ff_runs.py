@@ -57,7 +57,82 @@ COMPARISONS = [
     ("F2", "F0", "B vs baseline with frozen QKS (TN-only learning)"),
     ("F5", "F0", "A vs baseline with frozen QKS (TN-only learning)"),
     ("C0", "C0old", "new sweep vs original TNLayer implementation (regression)"),
+    # CPTP vertices (Kraus rank R); K4 is the unitary TTN written as a CPTP layer
+    ("K4", "C0", "CPTP layer at R = chi vs the unitary layer (regression, must be 0)"),
+    ("K8", "K4", "Kraus rank 8 vs 4 (no feedforward, shared)"),
+    ("K16", "K4", "Kraus rank 16 vs 4 (no feedforward, shared)"),
+    ("K16", "C1", "Kraus rank 16 shared vs per-node unitaries (more parameters, same information)"),
+    ("K32", "K16", "Kraus rank 32 vs 16 (Choi argument: no new channels)"),
+    ("K16p", "K16", "per-node vs shared gates at rank 16"),
+    ("K8B", "C2", "rank 8 + feedforward vs unitary + feedforward (shared)"),
+    ("K8B", "C4", "rank 8 shared + feedforward vs per-node unitary + feedforward (similar parameters)"),
+    ("K16B", "C2", "rank 16 + feedforward vs unitary + feedforward (shared)"),
+    ("K16B", "K8B", "rank 16 vs 8 with feedforward"),
+    ("K8pB", "C4", "per-node rank 8 + feedforward vs per-node unitary + feedforward"),
+    ("FK8", "F0", "rank 8 vs unitary, frozen QKS, no feedforward"),
+    ("FK16", "F0", "rank 16 vs unitary, frozen QKS, no feedforward"),
+    ("FK8B", "F2", "rank 8 + feedforward vs unitary + feedforward, frozen QKS"),
+    # parameter-matched frozen controls
+    ("FK8B", "F4", "shared rank 8 + feedforward vs per-node unitary + feedforward, frozen QKS (similar parameters)"),
+    ("FK8pB", "F4", "per-node rank 8 + feedforward vs per-node unitary + feedforward, frozen QKS"),
+    ("F4", "F2", "per-node vs shared unitary + feedforward, frozen QKS (parameters only)"),
+    # Haar-random initialization of the dilation
+    ("RK8", "K8", "Haar-random vs embedded initialization, rank 8"),
+    ("RK16", "K16", "Haar-random vs embedded initialization, rank 16"),
+    ("RK8B", "K8B", "Haar-random vs embedded initialization, rank 8 + feedforward"),
+    ("RK16B", "K16B", "Haar-random vs embedded initialization, rank 16 + feedforward"),
+    ("RK8B", "C2", "Haar-random rank 8 + feedforward vs unitary + feedforward"),
+    # wide root readout (chi * W outcomes)
+    ("K8BW8", "K8B", "root rank 8 (32 outcomes) vs unitary root (16), rank 8 + feedforward"),
+    ("K8BW16", "K8B", "root rank 16 (64 outcomes) vs unitary root (16), rank 8 + feedforward"),
+    ("K8BW16", "K8BW8", "root rank 16 vs 8"),
+    ("K8W16", "K8", "root rank 16 vs unitary root, rank 8, no feedforward"),
+    # patch encoder (CIFAR-10): controls L0 / L2 / L4
+    ("LK8", "L0", "CPTP rank 8 vs unitary, patch encoder, no feedforward"),
+    ("LK16", "L0", "CPTP rank 16 vs unitary, patch encoder, no feedforward"),
+    ("LK8B", "L2", "CPTP rank 8 + feedforward vs unitary + feedforward, shared, patch encoder"),
+    ("LK16B", "L2", "CPTP rank 16 + feedforward vs unitary + feedforward, shared, patch encoder"),
+    ("LK8B", "L4", "shared rank 8 + feedforward vs per-node unitary + feedforward (similar parameters), patch encoder"),
+    ("LK8pB", "L4", "per-node rank 8 + feedforward vs per-node unitary + feedforward, patch encoder"),
+    ("LK16B", "LK8B", "rank 16 vs 8 with feedforward, patch encoder"),
+    ("LK32", "LK16", "rank 32 vs 16, patch encoder, no feedforward"),
+    ("LK8BW16", "LK8B", "root rank 16 vs unitary root, rank 8 + feedforward, patch encoder"),
+    ("LK16B", "L4", "shared rank 16 + feedforward vs per-node unitary + feedforward (parameter-matched only at chi = 8: 2.31M vs 2.29M)"),
+    ("LK16B", "LK8pB", "shared rank 16 vs per-node rank 8, both with feedforward (553k vs 559k params, chi = 4)"),
+    ("LK16", "L0", "CPTP rank 16 vs unitary, no feedforward, patch encoder"),
+    # readout width vs root parameters (CIFAR-10, chi = 4): W8 = root rank 8, W16 = root rank 16, F = outcomes folded to 16
+    ("LK8BW8", "LK8B", "root rank 8 (32 outcomes) vs unitary root (16), rank 8 + feedforward"),
+    ("LK8BW8F", "LK8B", "root rank 8, outcomes folded to 16: root parameters without readout width"),
+    ("LK8BW16F", "LK8B", "root rank 16, outcomes folded to 16: root parameters without readout width"),
+    ("LK8BW16", "LK8BW16F", "readout width at fixed root parameters (64 vs 16 outcomes, root rank 16)"),
+    ("LK8BW8", "LK8BW8F", "readout width at fixed root parameters (32 vs 16 outcomes, root rank 8)"),
+    ("LK8BW16", "LK8BW8", "root rank 16 vs 8 (64 vs 32 outcomes)"),
+    ("LK16B", "LU8Bf112", "rank 16 vs shared unitary with 112 feedforward features at matched parameters, chi = 8"),
+    ("LU8Bf112", "L4", "shared unitary + 112 features vs per-node unitary, both about 2.3M parameters, chi = 8"),
+    ("LU8Bf112", "L2", "shared unitary with 112 vs 16 feedforward features, chi = 8"),
+    ("LK8BW16F", "LK8BRf272", "root environment (rank 16, folded) vs unitary root with 272 features at equal root parameters, chi = 4"),
+    ("LK8BRf272", "LK8B", "unitary root with 272 features vs 16 features, rank-8 vertices, chi = 4"),
+    # chi = 8: rank 32 with feedforward
+    ("LK32B", "LK16B", "rank 32 vs 16 with feedforward, chi = 8"),
+    ("LK32B", "L4", "rank 32 + feedforward (shared) vs per-node unitary + feedforward, chi = 8 (parameters not matched)"),
+    # A1: alternative matched-parameter unitary allocations at chi = 8
+    ("LK16B", "LU8pBf16R22", "rank 16 vs per-node unitary with 22 root features"),
+    ("LK16B", "LU8Bf187L012", "rank 16 vs unitary with feedforward at layers 0-2"),
+    ("LK16B", "LU8Bhidden111", "rank 16 vs unitary with trainable hidden feedforward features"),
+    ("LK16B", "LU8Brandom112", "rank 16 vs unitary with fixed random-projection features"),
+    ("LU8pBf16R22", "LU8Bf112", "per-node plus root features vs shared monomials"),
+    ("LU8Bf187L012", "LU8Bf112", "bottom-layer features vs shared monomials"),
+    ("LU8Bhidden111", "LU8Bf112", "trainable hidden features vs monomials"),
+    ("LU8Brandom112", "LU8Bf112", "random-projection features vs monomials"),
 ]
+
+for _base in ("LK16B", "L4", "LU8Brandom112"):
+    for _lf in ("05", "1", "2"):
+        for _wf in ("0", "1", "3"):
+            if (_lf, _wf) != ("1", "1"):
+                COMPARISONS.append((f"A2{_base}l{_lf}w{_wf}", _base,
+                                    f"A2 learning-rate/weight-decay setting vs default for {_base}"))
+COMPARISONS.append(("A2LK16Bl1w0", "A2L4l1w0", "both at lr 0.001 and wd 0; A2 partial grid"))
 
 # Fixed categorical slot per *model type* (colour follows the entity, never the rank).
 # Palette: dataviz reference categorical order (light surface).
@@ -102,6 +177,43 @@ LABEL = {
     "T4": "two-stage, feedforward",
     "L4lin": "local filters, feedforward, trainable output layer",
     "C4lin": "feedforward, trainable output layer",
+    "K4": "unitary (Kraus rank 4), shared gates",
+    "K8": "Kraus rank 8, shared gates",
+    "K16": "Kraus rank 16, shared gates",
+    "K32": "Kraus rank 32, shared gates",
+    "K16p": "Kraus rank 16, per-node gates",
+    "K8B": "rank 8 + feedforward, shared gates",
+    "K16B": "rank 16 + feedforward, shared gates",
+    "K8pB": "rank 8 + feedforward, per-node gates",
+    "FK8": "Kraus rank 8, shared gates",
+    "FK16": "Kraus rank 16, shared gates",
+    "FK8B": "rank 8 + feedforward, shared gates",
+    "F4": "feedforward (multishot), per-node gates",
+    "FK8pB": "rank 8 + feedforward, per-node gates",
+    "RK8": "Haar init, rank 8",
+    "RK16": "Haar init, rank 16",
+    "RK8B": "Haar init, rank 8 + feedforward",
+    "RK16B": "Haar init, rank 16 + feedforward",
+    "K8BW8": "rank 8 + feedforward, root rank 8",
+    "K8BW16": "rank 8 + feedforward, root rank 16",
+    "K8W8": "rank 8, root rank 8",
+    "K8W16": "rank 8, root rank 16",
+    "LK8": "rank 8, patch encoder",
+    "LK16": "rank 16, patch encoder",
+    "LK32": "rank 32, patch encoder",
+    "LK8B": "rank 8 + feedforward, shared gates",
+    "LK16B": "rank 16 + feedforward, shared gates",
+    "LK8pB": "rank 8 + feedforward, per-node gates",
+    "LK8BW16": "rank 8 + feedforward, root rank 16",
+    "LK8BW8F": "rank 8 + feedforward, root rank 8 (folded)",
+    "LK8BW16F": "rank 8 + feedforward, root rank 16 (folded)",
+    "LU8Bf112": "unitary, shared gates, 112 feedforward features",
+    "LU8pBf16R22": "unitary, per-node gates, 22 root features",
+    "LU8Bf187L012": "unitary, shared gates, 187 features at layers 0-2",
+    "LU8Bhidden111": "unitary, shared gates, 111 hidden features",
+    "LU8Brandom112": "unitary, shared gates, 112 random-projection features",
+    "LK8BRf272": "rank 8, unitary root with 272 root feedforward features",
+    "LK32B": "rank 32 + feedforward, shared gates",
 }
 # every line in the per-node facet is a per-node-gate model, so the qualifier is dropped there
 FACET_LABELS = {
@@ -356,9 +468,21 @@ def main(argv=None):
         ("patch encoder", ["L0", "L1", "L2", "L4", "R1", "R4", "U1", "U4", "L4lin"]),
         ("two-stage", ["L1", "L4", "T1", "T4"]),
         ("ablations", ["C2", "C2c", "C2s16", "C2s128", "C2s1024", "C2root", "C2top2"]),
+        ("CPTP rank, no feedforward", ["K4", "K8", "K16", "K32", "K16p"]),
+        ("CPTP rank, feedforward", ["C2", "K8B", "K16B", "K8pB", "C4"]),
+        ("CPTP rank, frozen QKS", ["F0", "FK8", "FK16", "F2", "F4", "FK8B", "FK8pB"]),
+        ("CPTP random init", ["K8", "RK8", "K16", "RK16", "K8B", "RK8B", "K16B", "RK16B"]),
+        ("CPTP wide root", ["K8", "K8W16", "K8B", "K8BW8", "K8BW16"]),
+        ("CPTP patch encoder, no feedforward", ["L0", "LK8", "LK16"]),
+        ("CPTP patch encoder, feedforward", ["L2", "L4", "LK8B", "LK16B", "LK32B", "LK8pB", "LK8BW16"]),
+        ("CPTP root width vs parameters", ["LK8B", "LK8BW8F", "LK8BW8", "LK8BW16F", "LK8BW16", "LK8BRf272"]),
+        ("matched-parameter unitary controls", ["L2", "L4", "LU8Bf112", "LK16B"]),
     ]:
         present = [c for c in confs if c in groups]
-        if facet in ("ablations", "patch encoder", "two-stage") and len(present) < 1:
+        if facet in ("ablations", "patch encoder", "two-stage") or facet.startswith("CPTP"):
+            if len(present) < 2:
+                continue
+        if False:
             continue
         if facet == "per-node gates" and len(present) < 2:
             continue

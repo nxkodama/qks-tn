@@ -55,7 +55,7 @@ data_vol = modal.Volume.from_name("qks-tn-data", create_if_missing=True)
 
 
 # Host memory per task: the training set is held in a CPU tf.Variable (uint8 for images).
-TASK_MEMORY_MB = {"binary": 8192, "multiclass": 8192, "cifar10": 8192, "imagenet32": 24576}
+TASK_MEMORY_MB = {"binary": 8192, "multiclass": 8192, "cifar10": 8192, "imagenet32": 24576, "timn100": 8192, "svhn": 8192}
 
 
 @app.function(image=image, cpu=8, memory=32768, timeout=3 * 60 * 60, volumes={"/data": data_vol})
@@ -145,6 +145,10 @@ def main(
     sigma_scale: float = 0.0,
     head: str = "",
     chi: int = 0,
+    holdout_5000: bool = False,
+    lr: float = 0.0,
+    wd: float = -1.0,
+    schedule: str = "",
 ):
     """``fresh=True`` ignores existing checkpoints on the Volume and retrains from scratch.
     ``nepisodes`` sets the tree depth (128 -> 6 layers, 256 -> 7, 512 -> 8, 64 -> 5).
@@ -157,7 +161,7 @@ def main(
     mem = int(memory_mb) or TASK_MEMORY_MB.get(task, 8192)
     job = Trainer.with_options(gpu=(None if gpu_name.lower() == "none" else gpu_name), memory=mem)()
 
-    if task in ("cifar10", "imagenet32"):
+    if task in ("cifar10", "imagenet32", "timn100", "svhn"):
         print(f"preparing {task} on the data Volume (no-op if cached) ...")
         print(prepare_data.remote(task))
 
@@ -187,6 +191,14 @@ def main(
                     ov["nepisodes"] = int(nepisodes // 2 * int(math.log2(int(chi))))
             if limit_train:
                 ov["limit_train"] = int(limit_train)
+            if holdout_5000:
+                ov["holdout_5000"] = True
+            if lr:
+                ov["lr"] = float(lr)
+            if wd >= 0:
+                ov["wd"] = float(wd)
+            if schedule:
+                ov["schedule"] = schedule
             cfg = rfe.make_cfg(**ov)
             cfg["config"] = c
             cfg["resume"] = not fresh

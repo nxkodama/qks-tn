@@ -61,6 +61,7 @@ DEFAULTS = dict(
     chi=4,
     sigma=0.125,  # QKS weight std for 784-dim inputs; scaled by sqrt(784/p) for other input sizes
     head="auto",  # const (paper's fixed 0/1 readout, <=10 classes) | linear (trainable logits) | auto
+    head_scale=None,  # W17: linear head only; multiply the readout probabilities by this constant before the Dense layer (None = no scaling layer, old behavior)
     # LeNet-style encoder (qks_tn_lenet.PatchQKSEncodingLayer); leaves = positions x groups
     encoder="dense",  # dense (paper's QKS) | patch (local filters) | twostage (patch -> tree -> re-encode -> tree)
     patch=None,  # receptive field (default per image size: 7 for 28x28, 4 for 32x32)
@@ -73,6 +74,21 @@ DEFAULTS = dict(
     shuffle_buffer=None,  # index-shuffle buffer; None = full permutation every epoch (indices only, cheap)
     lr=1e-3,
     wd=4e-4,
+    kraus_rank=None,  # None = unitary TTN; R >= chi = CPTP vertices of Kraus rank R (qks_tn_cptp)
+    root_rank=None,  # CPTP root vertex environment dimension (None = chi, unitary root); readout has chi*root_rank outcomes
+    root_fold=False,  # fold the chi*root_rank root outcomes back to chi**2 readout outcomes (parameters without width)
+    cptp_init="embed",  # embed (unitary embedded in the R-dim dilation) | random
+    cptp_init_noise=1e-2,
+    ff_dim=None,  # CPTP layer: feedforward features per non-root vertex (None = 2R); larger appends monomials of the environment probabilities
+    root_ff_dim=None,  # same for the root vertex (None = ff_dim)
+    ff_map="monomial",  # extra features: monomial, trainable hidden projection, or fixed random projection
+    ff_width=None,  # trainable linear compression of 2R child probabilities to a fixed width
+    meas_bases=None,  # CPTP layer: K measurement bases of each discarded register (None = computational basis only); each child passes K*R features
+    stoch=None,  # classical-stochastic twin of the CPTP tree (qks_tn_stoch): "full" (leaves dephased) | "c0" (layer 0 coherent CPTP) | "c2", "c3" (W16: first 2 / 3 layers coherent CPTP)
+    stoch_init_scale=0.3,  # W12: init scale of the classical node (StochTNLayer.init_scale); 0.3 = old default
+    leaf_dephase=None,  # W20: p in (0, 1]: leaf registers rho -> (1 - p) rho + p diag(rho) before layer 0 (CPTP layer); None = unchanged
+    ff_stop_grad=False,  # W27: tf.stop_gradient on the CPTP layer's feedforward features (forward unchanged; children get gradient only through the kept state)
+    schedule="restarts",  # W18: restarts = CosineDecayRestarts (cycles 1,2,4,.. epochs, no warmup) | cosine1 = one cosine decay to 0 over all epochs
 )
 
 CONFIGS = {
@@ -112,7 +128,101 @@ CONFIGS = {
     # trainable-logits head variants (the paper's fixed readout is the default)
     "L4lin": dict(encoder="patch", leaf_order="morton", mode="B", share_per_layer=False, head="linear"),
     "C4lin": dict(mode="B", share_per_layer=False, head="linear"),
+    # CPTP vertices (autograd on Stinespring isometries), Kraus rank R; chi = 4 -> R = 4 is the unitary TTN
+    **{f"K{R}{suf}": dict(kraus_rank=R, mode=m, share_per_layer=sh)
+       for R in (4, 8, 16, 32)
+       for suf, m, sh in (("", "baseline", True), ("p", "baseline", False), ("B", "B", True), ("pB", "B", False))},
+    # CPTP with the QKS encoder frozen (TN-only learning), to compare with F0 / F2
+    **{f"FK{R}{suf}": dict(kraus_rank=R, mode=m, share_per_layer=True, freeze_qks=True)
+       for R in (8, 16) for suf, m in (("", "baseline"), ("B", "B"))},
+    # parameter-matched frozen controls: unitary per-node + feedforward, and per-node rank 8 + feedforward
+    "F4": dict(mode="B", share_per_layer=False, freeze_qks=True),
+    "FK8pB": dict(kraus_rank=8, mode="B", share_per_layer=False, freeze_qks=True),
+    # Haar-random initialization of the dilation (instead of the embedded unitary)
+    **{f"RK{R}{suf}": dict(kraus_rank=R, mode=m, share_per_layer=True, cptp_init="random")
+       for R in (8, 16) for suf, m in (("", "baseline"), ("B", "B"))},
+    # wide root: the root vertex has Kraus rank W and the readout has chi*W outcomes
+    **{f"K{R}{suf}W{W}": dict(kraus_rank=R, root_rank=W, mode=m, share_per_layer=True)
+       for R in (8,) for W in (8, 16) for suf, m in (("", "baseline"), ("B", "B"))},
+    # CPTP with the LeNet-style patch encoder (CIFAR-10 / chi = 8): controls are L0, L1, L2, L4
+    **{f"LK{R}{suf}": dict(encoder="patch", leaf_order="morton", kraus_rank=R, mode=m, share_per_layer=sh)
+       for R in (4, 8, 16, 32)
+       for suf, m, sh in (("", "baseline", True), ("p", "baseline", False), ("B", "B", True), ("pB", "B", False))},
+    **{f"LK{R}B": dict(encoder="patch", leaf_order="morton", kraus_rank=R, mode="B", share_per_layer=True)
+       for R in (12, 24)},
+    **{f"LK{R}Bfw16": dict(encoder="patch", leaf_order="morton", kraus_rank=R,
+                            mode="B", share_per_layer=True, ff_width=16)
+       for R in (8, 16, 32)},
+    "LRK16B": dict(encoder="patch", leaf_order="morton", kraus_rank=16, mode="B", share_per_layer=True, cptp_init="random"),
+    **{f"LK8BW{W}": dict(encoder="patch", leaf_order="morton", kraus_rank=8, root_rank=W, mode="B", share_per_layer=True)
+       for W in (8, 16)},
+    # root parameters without readout width: rank-W root, outcomes folded back to chi**2
+    **{f"LK8BW{W}F": dict(encoder="patch", leaf_order="morton", kraus_rank=8, root_rank=W, root_fold=True, mode="B", share_per_layer=True)
+       for W in (8, 16)},
+    # chi = 8: rank 32 (4 chi) with feedforward is LK32B; baseline controls L0 / L2 / L4
+    # parameter-matched unitary controls (kraus_rank = chi, so no environment): feedforward features extended by
+    # monomials of the discarded-register probabilities
+    "LU8Bf112": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=112),  # vs LK16B (chi = 8)
+    "LU8pBf16R22": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=False, root_ff_dim=22),
+    "LU8Bf187L012": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=187, ff_layers="0,1,2"),
+    "LU8Bhidden111": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=111, ff_map="hidden"),
+    "LU8BmbK4": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, meas_bases=4),  # W7: unitary node, 4 measurement bases (vs LK16B, LU8Bf112)
+    "LU8BmbK2": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, meas_bases=2),
+    "LU8BmbK7": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, meas_bases=7),  # W10: 56 features per child, 112 per vertex (same vertex feature count as LU8Bf112)
+    "LU8BmbK8": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, meas_bases=8),  # W10 secondary
+    "LU8Brandom112": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=112, ff_map="random"),
+    # same parameters, different allocation: feedforward only at the top three layers, 187 features each
+    "LU8Bf187L345": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=187, ff_layers="3,4,5"),
+    "LU8Bf847": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=847),  # vs LK32B (chi = 8)
+    # W14 (timn100): unitary control for LK16B with a rank-16 root (540,639 root params): 131 root features -> 540,540 root params; 132 features at layers 1-4 -> total within 0.2% of LK16B + root_rank 16
+    "LU8Bf132R131": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=132, root_ff_dim=131),
+    "LK16BW16": dict(encoder="patch", leaf_order="morton", kraus_rank=16, root_rank=16, mode="B", share_per_layer=True),  # W14: rank-16 root, chi*16 = 128 readout outcomes (use --head const for the fixed readout)
+    "LK16BW16F": dict(encoder="patch", leaf_order="morton", kraus_rank=16, root_rank=16, root_fold=True, mode="B", share_per_layer=True),  # W14: same root parameters, outcomes folded to 64
+    "LK8BRf272": dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, root_ff_dim=272),  # unitary root vs LK8BW16F (chi = 4)
+    # classical-stochastic twins of LK16B (chi = 8, R = 16, shared, mode B): W8
+    "LS16B": dict(encoder="patch", leaf_order="morton", kraus_rank=16, mode="B", share_per_layer=True, stoch="full"),
+    "LS16Bc0": dict(encoder="patch", leaf_order="morton", kraus_rank=16, mode="B", share_per_layer=True, stoch="c0"),
+    "LS16Bf65": dict(encoder="patch", leaf_order="morton", kraus_rank=16, mode="B", share_per_layer=True, stoch="full", ff_dim=65, root_ff_dim=32),
+    # W16: first k layers coherent rank-16 CPTP vertices, layers k..5 classical (k = 1 is LS16Bc0)
+    "LS16Bck2": dict(encoder="patch", leaf_order="morton", kraus_rank=16, mode="B", share_per_layer=True, stoch="c2"),
+    "LS16Bck3": dict(encoder="patch", leaf_order="morton", kraus_rank=16, mode="B", share_per_layer=True, stoch="c3"),
 }
+# W20: partial leaf dephasing p, W5-selected lr/wd per model (LK16B lr 0.002 wd 4e-4; LU8Bf112 lr 0.001 wd 4e-4); p = 0 is the base config
+for _p, _t in ((0.25, "025"), (0.5, "05"), (0.75, "075"), (1.0, "1")):
+    CONFIGS[f"LK16Bd{_t}"] = dict(CONFIGS["LK16B"], lr=2e-3, leaf_dephase=_p)
+    CONFIGS[f"LU8Bf112d{_t}"] = dict(CONFIGS["LU8Bf112"], lr=1e-3, leaf_dephase=_p)
+
+# W12: classical arms with init scale 1.0 (the LK16B CPTP layer's scale); the init scale enters the run name only when it differs from 0.3
+for _b in ("LS16B", "LS16Bc0", "LS16Bf65"):
+    CONFIGS[_b + "i1"] = dict(CONFIGS[_b], stoch_init_scale=1.0)
+# W17 (timn100): classical-root width matched to the unitary control (root_ff_dim 131 -> 132 * 4096 = 540,672 root params)
+CONFIGS["LS16Bc0R131"] = dict(CONFIGS["LS16Bc0"], root_ff_dim=131)
+# W26: LS16Bc0 with ff_dim 65 at layers 1-4, root 32: 2,314,239 TN params (LK16B 2,314,074, +0.007%)
+CONFIGS["LS16Bc0f65"] = dict(CONFIGS["LS16Bc0"], ff_dim=65, root_ff_dim=32)
+# W17: shared linear readout (64 outcomes -> 100 logits) with a constant gain on the probabilities; name suffix H<gain>
+for _b in ("LK16BW16F", "LU8Bf132R131", "LS16Bc0R131"):
+    for _h in (1, 4, 16, 64, 256, 1024):
+        CONFIGS[f"{_b}H{_h}"] = dict(CONFIGS[_b], head="linear", head_scale=float(_h))
+
+# W19 (rank at fixed ~2.3M TN parameters, chi 8, shared, mode B): LK12Bf55 2,302,695; LK24Bfw14 2,313,428; LK32Bfw7 2,197,655 (-4.45%); R=8 is LU8Bf112, R=16 is LK16B
+CONFIGS["LK12Bf55"] = dict(encoder="patch", leaf_order="morton", kraus_rank=12, mode="B", share_per_layer=True, ff_dim=55)
+CONFIGS["LK24Bfw14"] = dict(encoder="patch", leaf_order="morton", kraus_rank=24, mode="B", share_per_layer=True, ff_width=14)
+CONFIGS["LK32Bfw7"] = dict(encoder="patch", leaf_order="morton", kraus_rank=32, mode="B", share_per_layer=True, ff_width=7)
+
+# W24 (feedforward width 32 at layers 1-4 for every R; root width sets the parameters): R=8 2,301,390; R=12 2,298,485; R=16 is LK16B (2,314,074); R=24 5,045,594 (+119%, cannot fit at F=32)
+CONFIGS["LK8Bf32R428"] = dict(encoder="patch", leaf_order="morton", kraus_rank=8, mode="B", share_per_layer=True, ff_dim=32, root_ff_dim=428)
+CONFIGS["LK12Bf32R261"] = dict(encoder="patch", leaf_order="morton", kraus_rank=12, mode="B", share_per_layer=True, ff_dim=32, root_ff_dim=261)
+CONFIGS["LK24Bfw32"] = dict(encoder="patch", leaf_order="morton", kraus_rank=24, mode="B", share_per_layer=True, ff_width=32)
+
+# W27 (feedforward channel ablations of LK16B at its W5 setting lr 0.002, wd 4e-4): stop-gradient on the features; features shuffled across the batch
+CONFIGS["LK16Bsg"] = dict(CONFIGS["LK16B"], lr=2e-3, ff_stop_grad=True)
+CONFIGS["LK16Bshuf"] = dict(CONFIGS["LK16B"], lr=2e-3, ff_null="shuffle")
+
+# Registered A2 grid. Each name fixes one base model and one (lr, wd) factor pair.
+for _base in ("LK16B", "L4", "LU8Brandom112"):
+    for _lf, _lr in (("05", 5e-4), ("1", 1e-3), ("2", 2e-3)):
+        for _wf, _wd in (("0", 0.0), ("1", 4e-4), ("3", 1.2e-3)):
+            CONFIGS[f"A2{_base}l{_lf}w{_wf}"] = dict(CONFIGS[_base], lr=_lr, wd=_wd)
 
 
 def make_cfg(**overrides) -> dict:
@@ -120,6 +230,38 @@ def make_cfg(**overrides) -> dict:
     cfg.update({k: v for k, v in overrides.items() if v is not None})
     if cfg["name"] is None:
         parts = [cfg["task"], cfg["mode"], "shared" if cfg["share_per_layer"] else "pervertex"]
+        if cfg.get("holdout_5000"):
+            parts.append("holdout5000")
+        if cfg["kraus_rank"]:
+            parts.append(f"kraus{cfg['kraus_rank']}")
+        if cfg["root_rank"]:
+            parts.append(f"root{cfg['root_rank']}" + ("fold" if cfg["root_fold"] else ""))
+        if cfg["ff_dim"]:
+            parts.append(f"ffd{cfg['ff_dim']}")
+        if cfg["root_ff_dim"]:
+            parts.append(f"rffd{cfg['root_ff_dim']}")
+        if cfg["ff_width"]:
+            parts.append(f"ffw{cfg['ff_width']}")
+        if cfg.get("meas_bases"):
+            parts.append(f"mb{cfg['meas_bases']}")
+        if cfg.get("leaf_dephase"):
+            parts.append(f"dph{cfg['leaf_dephase']}")
+        if cfg.get("ff_stop_grad"):
+            parts.append("sg")
+        if cfg.get("stoch"):
+            parts.append(f"stoch-{cfg['stoch']}")
+            if float(cfg["stoch_init_scale"]) != 0.3:
+                parts.append(f"is{cfg['stoch_init_scale']}")
+        if cfg["ff_map"] != "monomial":
+            parts.append(f"ffmap-{cfg['ff_map']}")
+        if cfg.get("schedule", "restarts") != "restarts":
+            parts.append(f"sched-{cfg['schedule']}")
+        if float(cfg["lr"]) != float(DEFAULTS["lr"]):
+            parts.append(f"lr{cfg['lr']}")
+        if float(cfg["wd"]) != float(DEFAULTS["wd"]):
+            parts.append(f"wd{cfg['wd']}")
+        if cfg["kraus_rank"] and cfg["cptp_init"] != "embed":
+            parts.append(f"init-{cfg['cptp_init']}")
         if cfg["ff_null"]:
             parts.append(f"null-{cfg['ff_null']}")
         if cfg["shots"]:
@@ -149,6 +291,8 @@ def make_cfg(**overrides) -> dict:
             parts.append(f"chi{cfg['chi']}")
         if cfg.get("head") not in (None, "auto"):
             parts.append(f"head-{cfg['head']}")
+        if cfg.get("head_scale"):
+            parts.append(f"hs{cfg['head_scale']}")
         parts.append(f"s{cfg['seed']}")
         cfg["name"] = "_".join(parts)
     return cfg
@@ -165,8 +309,8 @@ def _parse_layers(v):
 # --------------------------------------------------------------------------------------
 # Data
 # --------------------------------------------------------------------------------------
-N_CLASSES = {"binary": 2, "multiclass": 10, "cifar10": 10, "imagenet32": 1000}
-IMAGE_SHAPES = {"binary": (28, 28, 1), "multiclass": (28, 28, 1), "cifar10": (32, 32, 3), "imagenet32": (32, 32, 3)}
+N_CLASSES = {"binary": 2, "multiclass": 10, "cifar10": 10, "imagenet32": 1000, "timn100": 100, "svhn": 10}
+IMAGE_SHAPES = {"binary": (28, 28, 1), "multiclass": (28, 28, 1), "cifar10": (32, 32, 3), "imagenet32": (32, 32, 3), "timn100": (32, 32, 3), "svhn": (32, 32, 3)}
 PATCH_DEFAULTS = {(28, 28): dict(patch=7, stride=3, pad=0), (32, 32): dict(patch=4, stride=4, pad=0)}
 
 
@@ -179,6 +323,100 @@ def patch_geometry(cfg: dict) -> dict:
             geo[k] = int(cfg[k])
     return geo
 HF_IMAGENET32 = "benjamin-paine/imagenet-1k-32x32"  # ImageNet-1k, centre-crop + Lanczos to 32x32
+SVHN_URLS = {"train": "http://ufldl.stanford.edu/housenumbers/train_32x32.mat", "test": "http://ufldl.stanford.edu/housenumbers/test_32x32.mat"}  # official files; the 'extra' split is not used
+
+
+def _svhn_mat_to_uint8(path: str):
+    """Official SVHN cropped-digit .mat (X: (32, 32, 3, n) uint8, y: (n, 1) in 1..10 with 10 = digit 0)
+    -> X uint8 (n, 3072) channels-last row-major (same layout as CIFAR-10), y int16 in 0..9."""
+    import numpy as np
+    from scipy.io import loadmat
+
+    m = loadmat(path)
+    X = np.asarray(m["X"], dtype=np.uint8)
+    y = np.asarray(m["y"]).reshape(-1).astype(np.int16)
+    if X.ndim != 4 or X.shape[:3] != (32, 32, 3) or X.shape[3] != len(y):
+        raise ValueError(f"unexpected SVHN array shapes {X.shape}, {y.shape}")
+    y = np.where(y == 10, 0, y).astype(np.int16)
+    if y.min() < 0 or y.max() > 9:
+        raise ValueError("SVHN labels outside 1..10")
+    return np.ascontiguousarray(X.transpose(3, 0, 1, 2)).reshape(len(y), -1), y
+
+
+HF_SVHN = "ufldl-stanford/svhn"  # ungated HF mirror of the official cropped-digit data (config cropped_digits)
+
+
+def _svhn_split_hf(split: str, log=print):
+    """Fallback when the official .mat host is unreachable: the ungated HF mirror's standard parquet file for
+    ``split`` (the 'extra' files are never fetched). Labels are already 0..9. Returns X uint8 (n, 3072), y int16."""
+    import io
+
+    import numpy as np
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+    from PIL import Image
+
+    fn = hf_hub_download(HF_SVHN, f"cropped_digits/{split}-00000-of-00001.parquet", repo_type="dataset")
+    tab = pq.read_table(fn).to_pydict()
+    n = len(tab["label"])
+    X = np.empty((n, 3072), dtype=np.uint8)
+    for i, im in enumerate(tab["image"]):
+        X[i] = np.asarray(Image.open(io.BytesIO(im["bytes"])).convert("RGB"), dtype=np.uint8).reshape(-1)
+    return X, np.asarray(tab["label"], dtype=np.int16)
+
+
+def _svhn_split(split: str, raw_dir: str, log=print):
+    """Official .mat (30 s connect timeout), else the HF mirror; checks the official counts and label range."""
+    import shutil
+    import urllib.request
+
+    os.makedirs(raw_dir, exist_ok=True)
+    path = os.path.join(raw_dir, f"{split}_32x32.mat")
+    X = None
+    try:
+        if not os.path.exists(path):
+            log(f"downloading {SVHN_URLS[split]}")
+            with urllib.request.urlopen(SVHN_URLS[split], timeout=30) as r, open(path + ".tmp", "wb") as f:
+                shutil.copyfileobj(r, f)
+            os.replace(path + ".tmp", path)
+        X, y = _svhn_mat_to_uint8(path)
+        source = "official .mat"
+    except OSError as exc:  # URLError, timeouts and refused connections are OSError subclasses
+        log(f"official SVHN host unreachable ({exc!r}); using the HF mirror {HF_SVHN}")
+    if X is None:
+        X, y = _svhn_split_hf(split, log)
+        source = f"HF mirror {HF_SVHN}"
+    expect = {"train": 73257, "test": 26032}[split]
+    if len(y) != expect or X.shape != (expect, 3072) or y.min() < 0 or y.max() > 9:
+        raise ValueError(f"SVHN {split}: got X {X.shape}, y [{y.min()}, {y.max()}] n={len(y)}; expected {expect} images, labels 0..9")
+    log(f"svhn {split}: {len(y)} images from {source}")
+    return X, y
+
+
+HF_TIMN = "zh-plus/tiny-imagenet"  # ungated Tiny-ImageNet: 200 classes, 64x64, 500 train + 50 validation images per class
+
+
+def _timn100_split(split: str, log=print):
+    """First 100 classes (sorted wnid order = HF label ids 0..99) of a Tiny-ImageNet split, 64x64 -> 32x32
+    by 2x2 area averaging (rounded to uint8). Returns X uint8 (n, 3072), y int16."""
+    import numpy as np
+    from datasets import load_dataset
+
+    ds = load_dataset(HF_TIMN, split=split)
+    names = ds.features["label"].names
+    if list(names) != sorted(names):
+        raise RuntimeError("Tiny-ImageNet label names are not in sorted wnid order; 'first 100 by sorted label' is ambiguous")
+    labels = np.asarray(ds["label"], dtype=np.int16)
+    idx = np.flatnonzero(labels < 100)
+    X = np.empty((len(idx), 32 * 32 * 3), dtype=np.uint8)
+    for j, i in enumerate(idx):
+        a = np.asarray(ds[int(i)]["image"].convert("RGB"), dtype=np.float32)  # (64, 64, 3)
+        a = a.reshape(32, 2, 32, 2, 3).mean(axis=(1, 3))
+        X[j] = np.rint(a).astype(np.uint8).reshape(-1)
+        if j % 10_000 == 0 and j:
+            log(f"  timn100 {split}: {j}/{len(idx)}")
+    log(f"timn100 {split}: {len(idx)} images, classes {names[0]} .. {names[99]}")
+    return X, labels[idx]
 
 
 def _hf_split_to_uint8(repo: str, split: str, log=print):
@@ -210,7 +448,7 @@ def load_data(task: str, cache_dir: str, log=print):
     """
     import numpy as np
     os.makedirs(cache_dir, exist_ok=True)
-    if task in ("cifar10", "imagenet32"):
+    if task in ("cifar10", "imagenet32", "timn100", "svhn"):
         d = os.path.join(cache_dir, task)
         files = [os.path.join(d, f) for f in ("X_train.npy", "y_train.npy", "X_test.npy", "y_test.npy")]
         if not all(os.path.exists(f) for f in files):
@@ -222,6 +460,14 @@ def load_data(task: str, cache_dir: str, log=print):
                 Xtr = Xtr.reshape(len(Xtr), -1).astype(np.uint8)
                 Xte = Xte.reshape(len(Xte), -1).astype(np.uint8)
                 ytr, yte = ytr.reshape(-1).astype(np.int16), yte.reshape(-1).astype(np.int16)
+            elif task == "svhn":
+                Xtr, ytr = _svhn_split("train", os.path.join(d, "raw"), log)
+                Xte, yte = _svhn_split("test", os.path.join(d, "raw"), log)
+            elif task == "timn100":
+                log(f"downloading + decoding {HF_TIMN} (train, first 100 classes)")
+                Xtr, ytr = _timn100_split("train", log)
+                log(f"downloading + decoding {HF_TIMN} (valid, first 100 classes; used as the test set)")
+                Xte, yte = _timn100_split("valid", log)
             else:
                 log(f"downloading + decoding {HF_IMAGENET32} (train)")
                 Xtr, ytr = _hf_split_to_uint8(HF_IMAGENET32, "train", log)
@@ -262,6 +508,49 @@ def load_data(task: str, cache_dir: str, log=print):
     return X_train, y_train, X_test, y_test
 
 
+def split_cifar10_holdout(X_train, y_train):
+    """W4's fixed stratified CIFAR-10 split: 500 images per class, seed 20261102."""
+    import numpy as np
+
+    if len(y_train) != 50000 or len(X_train) != 50000:
+        raise ValueError("--holdout-5000 requires the full CIFAR-10 training set")
+    rng = np.random.default_rng(20261102)
+    val_parts = [rng.permutation(np.flatnonzero(y_train == c))[:500] for c in range(10)]
+    val_idx = np.sort(np.concatenate(val_parts))
+    keep = np.ones(len(y_train), dtype=bool)
+    keep[val_idx] = False
+    return X_train[keep], y_train[keep], X_train[val_idx], y_train[val_idx], val_idx
+
+
+def split_svhn_holdout(X_train, y_train):
+    """Stratified SVHN selection holdout: 500 of the standard-train images per class (5,000 total), seed 20261102.
+    The remaining 68,257 images are the holdout-protocol training set."""
+    import numpy as np
+
+    if len(y_train) != 73257 or len(X_train) != 73257:
+        raise ValueError("--holdout-5000 requires the full SVHN training set (73,257 images)")
+    rng = np.random.default_rng(20261102)
+    val_parts = [rng.permutation(np.flatnonzero(y_train == c))[:500] for c in range(10)]
+    val_idx = np.sort(np.concatenate(val_parts))
+    keep = np.ones(len(y_train), dtype=bool)
+    keep[val_idx] = False
+    return X_train[keep], y_train[keep], X_train[val_idx], y_train[val_idx], val_idx
+
+
+def split_timn100_holdout(X_train, y_train):
+    """Stratified timn100 selection holdout: 50 of the 500 training images per class (5,000 total), seed 20261102."""
+    import numpy as np
+
+    if len(y_train) != 50000 or len(X_train) != 50000:
+        raise ValueError("--holdout-5000 requires the full timn100 training set")
+    rng = np.random.default_rng(20261102)
+    val_parts = [rng.permutation(np.flatnonzero(y_train == c))[:50] for c in range(100)]
+    val_idx = np.sort(np.concatenate(val_parts))
+    keep = np.ones(len(y_train), dtype=bool)
+    keep[val_idx] = False
+    return X_train[keep], y_train[keep], X_train[val_idx], y_train[val_idx], val_idx
+
+
 def make_dataset(X, y, batch_size: int, shuffle: bool, seed: int, shuffle_buffer=None):
     """tf.data pipeline backed by a CPU tf.Variable (sidesteps the 2 GB graph-constant limit).
 
@@ -299,6 +588,21 @@ def make_dataset(X, y, batch_size: int, shuffle: bool, seed: int, shuffle_buffer
 # --------------------------------------------------------------------------------------
 # Model
 # --------------------------------------------------------------------------------------
+def _make_schedule(cfg: dict, key: str, steps_per_epoch: int):
+    """Learning-rate / weight-decay schedule for cfg[key] ("lr" or "wd").
+
+    restarts (default): CosineDecayRestarts, first cycle = 1 epoch, cycle length doubling (t_mul 2), no warmup.
+    cosine1: one cosine decay from cfg[key] to 0 over cfg["epochs"] * steps_per_epoch steps, no warmup, no restarts."""
+    import tensorflow as tf
+
+    sched = cfg.get("schedule", "restarts")
+    if sched == "restarts":
+        return tf.keras.optimizers.schedules.CosineDecayRestarts(cfg[key], steps_per_epoch)
+    if sched == "cosine1":
+        return tf.keras.optimizers.schedules.CosineDecay(cfg[key], int(cfg["epochs"]) * steps_per_epoch, alpha=0.0)
+    raise ValueError(f"unknown schedule {sched!r}")
+
+
 def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | None = None):
     import numpy as np
     import tensorflow as tf
@@ -340,8 +644,8 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         if cfg["freeze_qks"]:
             stage.enc1.trainable = False
             stage.enc2.trainable = False
-        lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["lr"], steps_per_epoch)
-        wd_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["wd"], steps_per_epoch)
+        lr_schedule = _make_schedule(cfg, "lr", steps_per_epoch)
+        wd_schedule = _make_schedule(cfg, "wd", steps_per_epoch)
         model.compile(loss=loss, optimizer=AdamW(learning_rate=lr_schedule, weight_decay=wd_schedule), metrics=["accuracy"])
         counts = dict(
             total=int(model.count_params()),
@@ -398,6 +702,36 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         _, path = old.greedy(nodes_set, output_edge_order=edge_order)
         tn_layer = old.TNLayer(cfg["chi"], nlayers, path)
         tn_effective = (cfg["chi"] ** 4 - 1) * nlayers
+    elif cfg.get("stoch"):
+        import qks_tn_stoch as stoch
+
+        tn_layer = stoch.StochTNLayer(
+            chi=cfg["chi"], nlayers=nlayers, mode=cfg["mode"], share_per_layer=cfg["share_per_layer"],
+            kraus_rank=int(cfg["kraus_rank"]), coherent_layers={"full": 0, "c0": 1, "c2": 2, "c3": 3}[cfg["stoch"]],
+            ff_dim=(int(cfg["ff_dim"]) if cfg["ff_dim"] else None),
+            root_ff_dim=(int(cfg["root_ff_dim"]) if cfg["root_ff_dim"] else None),
+            init_noise=float(cfg["cptp_init_noise"]), seed=int(cfg["seed"]),
+            init_scale=float(cfg.get("stoch_init_scale", 0.3)),
+        )
+        tn_effective = None
+    elif cfg["kraus_rank"]:
+        import qks_tn_cptp as cptp
+
+        tn_layer = cptp.CPTPTNLayer(
+            chi=cfg["chi"], nlayers=nlayers, mode=cfg["mode"], share_per_layer=cfg["share_per_layer"],
+            kraus_rank=int(cfg["kraus_rank"]), root_rank=(int(cfg["root_rank"]) if cfg["root_rank"] else None),
+            root_fold=bool(cfg["root_fold"]),
+            ff_dim=(int(cfg["ff_dim"]) if cfg["ff_dim"] else None),
+            root_ff_dim=(int(cfg["root_ff_dim"]) if cfg["root_ff_dim"] else None),
+            ff_map=cfg["ff_map"],
+            ff_width=(int(cfg["ff_width"]) if cfg["ff_width"] else None),
+            meas_bases=(int(cfg["meas_bases"]) if cfg.get("meas_bases") else None),
+            leaf_dephase=(float(cfg["leaf_dephase"]) if cfg.get("leaf_dephase") else None),
+            ff_stop_grad=bool(cfg.get("ff_stop_grad")), ff_null=cfg.get("ff_null"),
+            init=cfg["cptp_init"], init_noise=float(cfg["cptp_init_noise"]),
+            ff_layers=_parse_layers(cfg["ff_layers"]), seed=int(cfg["seed"]),
+        )
+        tn_effective = None
     else:
         tn_layer = ff.FeedforwardTNLayer(
             chi=cfg["chi"],
@@ -413,6 +747,8 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         tn_effective = None
 
     n_outcomes = int(cfg["chi"]) ** 2
+    if cfg.get("kraus_rank") and cfg.get("root_rank") and not cfg.get("root_fold"):
+        n_outcomes = int(cfg["chi"]) * int(cfg["root_rank"])
     if head_kind == "const":
         head = ff.ConstMulFixed(n_outcomes, n_classes)
         loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
@@ -420,12 +756,15 @@ def build_model(cfg: dict, steps_per_epoch: int, p: int = 784, n_classes: int | 
         # trainable logits from the 16 readout probabilities (needed when classes > 16)
         head = tf.keras.layers.Dense(n_classes, name="linear_head")
         loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-    model = tf.keras.Sequential([tf.keras.layers.InputLayer(input_shape=(p,)), qks, tn_layer, head])
+    _readout = [head]
+    if head_kind == "linear" and cfg.get("head_scale"):  # W17: constant gain on the readout probabilities (no parameters)
+        _readout = [tf.keras.layers.Rescaling(float(cfg["head_scale"]), name="head_scale"), head]
+    model = tf.keras.Sequential([tf.keras.layers.InputLayer(input_shape=(p,)), qks, tn_layer, *_readout])
     if cfg["freeze_qks"]:
         qks.trainable = False
 
-    lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["lr"], steps_per_epoch)
-    wd_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(cfg["wd"], steps_per_epoch)
+    lr_schedule = _make_schedule(cfg, "lr", steps_per_epoch)
+    wd_schedule = _make_schedule(cfg, "wd", steps_per_epoch)
     model.compile(
         loss=loss,
         optimizer=AdamW(learning_rate=lr_schedule, weight_decay=wd_schedule),
@@ -526,6 +865,12 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
 
     t_start = time.time()
     X_train, y_train, X_test, y_test = load_data(cfg["task"], cfg["cache_dir"], log=log)
+    holdout = bool(cfg.get("holdout_5000"))
+    if holdout:
+        if cfg["task"] not in ("cifar10", "timn100", "svhn"):
+            raise ValueError("--holdout-5000 is only supported for CIFAR-10, timn100 and svhn")
+        _split = {"timn100": split_timn100_holdout, "svhn": split_svhn_holdout}.get(cfg["task"], split_cifar10_holdout)
+        X_train, y_train, X_val, y_val, val_idx = _split(X_train, y_train)
     if cfg.get("limit_train"):
         X_train, y_train = X_train[: int(cfg["limit_train"])], y_train[: int(cfg["limit_train"])]
     bs = int(cfg["batch_size"])
@@ -541,6 +886,7 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
     train_ds = make_dataset(X_train, y_train, bs, shuffle=True, seed=int(cfg["seed"]), shuffle_buffer=cfg.get("shuffle_buffer"))
     log(f"[{cfg['name']}] shuffle buffer = {cfg.get('shuffle_buffer') or len(y_train)} of {len(y_train)} (full permutation)" if not cfg.get("shuffle_buffer") else f"[{cfg['name']}] shuffle buffer = {cfg['shuffle_buffer']} of {len(y_train)} (WINDOWED)")
     test_ds = make_dataset(X_test, y_test, bs, shuffle=False, seed=int(cfg["seed"]))
+    val_ds = make_dataset(X_val, y_val, bs, shuffle=False, seed=int(cfg["seed"])) if holdout else test_ds
 
     history = []
     initial_epoch = 0
@@ -577,6 +923,11 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
         def on_epoch_begin(self, epoch, logs=None):
             self._t0 = time.time()
             self._t_val = None
+            self._first_batch_loss = None
+
+        def on_train_batch_end(self, batch, logs=None):
+            if batch == 0:
+                self._first_batch_loss = float((logs or {}).get("loss", np.nan))
 
         def on_test_begin(self, logs=None):
             if getattr(self, "_t0", None) is not None:
@@ -597,6 +948,7 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
                 train_time_s=train_time,
                 ms_per_step=1000.0 * train_time / max(steps_per_epoch, 1),
                 loss=float(logs.get("loss", np.nan)),
+                first_batch_loss=self._first_batch_loss,
                 acc=float(logs.get("accuracy", np.nan)),
                 val_loss=float(logs["val_loss"]) if "val_loss" in logs else None,
                 val_acc=float(logs["val_accuracy"]) if "val_accuracy" in logs else None,
@@ -630,7 +982,7 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
             train_ds,
             epochs=int(cfg["epochs"]),
             initial_epoch=initial_epoch,
-            validation_data=test_ds if cfg["eval_every_epoch"] else None,
+            validation_data=val_ds if cfg["eval_every_epoch"] else None,
             verbose=0,
             callbacks=[EpochLogger()],
         )
@@ -661,6 +1013,12 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
         test_predictions=preds,
         test_errors=test_errors,
     )
+    if holdout:
+        result["n_val"] = int(len(y_val))
+        result["validation_split_seed"] = 20261102
+        result["validation_indices"] = val_idx.astype(int).tolist()
+        val_loss, val_acc = model.evaluate(val_ds, verbose=0)
+        result["final_val"] = dict(loss=float(val_loss), acc=float(val_acc))
     if result["best_val"] is not None:
         va, nvl, ep = result["best_val"]
         result["best_val"] = dict(val_acc=va, val_loss=-nvl, epoch=ep)
@@ -681,8 +1039,9 @@ def train(cfg: dict, on_epoch=None, log=_log) -> dict:
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", choices=sorted(CONFIGS), help="named configuration (overrides mode/share/etc.)")
-    ap.add_argument("--task", choices=["binary", "multiclass", "cifar10", "imagenet32"])
+    ap.add_argument("--task", choices=["binary", "multiclass", "cifar10", "imagenet32", "timn100", "svhn"])
     ap.add_argument("--head", choices=["auto", "const", "linear"])
+    ap.add_argument("--head-scale", dest="head_scale", type=float, help="linear head: constant gain on the readout probabilities (W17)")
     ap.add_argument("--mode", choices=["baseline", "A", "B"])
     ap.add_argument("--impl", choices=["new", "old"])
     ap.add_argument("--epochs", type=int)
@@ -704,10 +1063,26 @@ def build_parser():
     ap.add_argument("--ff-layers", dest="ff_layers", help="comma-separated layers receiving feedforward, e.g. 4,5")
     ap.add_argument("--ff-features", dest="ff_features", choices=["raw", "centered"])
     ap.add_argument("--ff-null", dest="ff_null", choices=["none", "constant", "shuffle"])
+    ap.add_argument("--kraus-rank", dest="kraus_rank", type=int, help="CPTP vertices of this Kraus rank (>= chi)")
+    ap.add_argument("--root-rank", dest="root_rank", type=int, help="CPTP root vertex Kraus rank; the readout widens to chi*root_rank")
+    ap.add_argument("--root-fold", dest="root_fold", action="store_true", default=None, help="fold root outcomes back to chi**2")
+    ap.add_argument("--ff-dim", dest="ff_dim", type=int, help="CPTP layer: feedforward features per vertex (>= 2R; extra are monomials)")
+    ap.add_argument("--root-ff-dim", dest="root_ff_dim", type=int, help="CPTP layer: feedforward features at the root")
+    ap.add_argument("--ff-map", dest="ff_map", choices=["monomial", "hidden", "random"], help="CPTP extra feature allocation")
+    ap.add_argument("--ff-width", dest="ff_width", type=int, help="CPTP trainable linear compression of 2R child probabilities")
+    ap.add_argument("--meas-bases", dest="meas_bases", type=int, help="CPTP layer: K measurement bases of each discarded register (K*R features per child)")
+    ap.add_argument("--leaf-dephase", dest="leaf_dephase", type=float, help="CPTP layer: leaf dephasing p, rho -> (1 - p) rho + p diag(rho)")
+    ap.add_argument("--ff-stop-grad", dest="ff_stop_grad", action="store_const", const=True, default=None, help="CPTP layer: stop gradients through the feedforward features (W27)")
+    ap.add_argument("--cptp-init", dest="cptp_init", choices=["embed", "random"])
+    ap.add_argument("--cptp-init-noise", dest="cptp_init_noise", type=float)
+    ap.add_argument("--stoch-init-scale", dest="stoch_init_scale", type=float, help="classical node (stoch configs): init scale, default 0.3")
+    ap.add_argument("--schedule", choices=["restarts", "cosine1"], help="lr/wd schedule: restarts (default, CosineDecayRestarts) | cosine1 (single cosine decay to 0 over all epochs)")
     ap.add_argument("--freeze-qks", dest="freeze_qks", action="store_true", default=None)
     ap.add_argument("--fast-qks", dest="fast_qks", action="store_true", default=None)
     ap.add_argument("--no-fast-qks", dest="fast_qks", action="store_false")
     ap.add_argument("--limit-train", dest="limit_train", type=int)
+    ap.add_argument("--holdout-5000", dest="holdout_5000", action="store_true", default=None,
+                    help="CIFAR-10: use W4's stratified 45k train / 5k validation split (seed 20261102)")
     ap.add_argument("--no-eval-every-epoch", dest="eval_every_epoch", action="store_false", default=None)
     ap.add_argument("--intra-threads", dest="intra_threads", type=int)
     ap.add_argument("--inter-threads", dest="inter_threads", type=int)
