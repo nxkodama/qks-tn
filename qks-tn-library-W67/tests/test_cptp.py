@@ -1,0 +1,467 @@
+"""Tests for ``qks_tn_cptp.CPTPTNLayer``.
+
+    .venv/bin/python qks-tn-library/tests/test_cptp.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import numpy as np
+import tensorflow as tf
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "common_functions"))
+
+import qks_tn_cptp as cp  # noqa: E402
+import qks_tn_ff as ff  # noqa: E402
+
+CHI, NL, B = 2, 3, 5
+
+
+def pure_registers(batch, chi, nleaves, seed):
+    rng = np.random.default_rng(seed)
+    psi = rng.normal(size=(batch, nleaves, chi)) + 1j * rng.normal(size=(batch, nleaves, chi))
+    psi /= np.linalg.norm(psi, axis=-1, keepdims=True)
+    rho = np.einsum("bli,blj->bijl", psi, psi.conj())  # (B, chi, chi, L)
+    return tf.constant(rho, dtype=tf.complex64)
+
+
+def test_rank_chi_equals_unitary_layer():
+    for mode in ("baseline", "B"):
+        for share in (True, False):
+            x = pure_registers(B, CHI, 2**NL, 0)
+            ref = ff.FeedforwardTNLayer(chi=CHI, nlayers=NL, mode=mode, share_per_layer=share, seed=3)
+            new = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode=mode, share_per_layer=share, kraus_rank=CHI, seed=3)
+            if mode == "B":  # nonzero feedforward weights, identical in both layers
+                rng = np.random.default_rng(1)
+                w = rng.normal(0, 0.3, size=ref.params_ff.shape).astype(np.float32)
+                ref.params_ff.assign(w)
+                off = 0
+                for l in range(1, NL):
+                    nu = 1 if share else ref.n_vertices[l]
+                    new.pff[l].assign(w[:, off : off + nu])
+                    off += nu
+            err = np.abs(ref(x).numpy() - new(x).numpy()).max()
+            assert err < 1e-5, (mode, share, err)
+
+
+def test_embedded_init_reproduces_unitary_at_higher_rank():
+    x = pure_registers(B, CHI, 2**NL, 1)
+    ref = ff.FeedforwardTNLayer(chi=CHI, nlayers=NL, mode="baseline", share_per_layer=False, seed=4)
+    for R in (4, 8):
+        new = cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=R, share_per_layer=False, init_noise=0.0, seed=4)
+        err = np.abs(ref(x).numpy() - new(x).numpy()).max()
+        assert err < 1e-5, (R, err)
+
+
+def test_trace_preserving_and_isometry():
+    for mode in ("baseline", "B"):
+        x = pure_registers(B, CHI, 2**NL, 2)
+        new = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode=mode, kraus_rank=6, init="random", init_noise=0.5, seed=5)
+        if mode == "B":
+            for w in new.pff:
+                if w is not None:
+                    w.assign(np.random.default_rng(0).normal(0, 0.3, size=w.shape).astype(np.float32))
+        assert np.allclose(new(x).numpy().sum(-1), 1.0, atol=1e-4)
+        for l in range(NL):
+            V = new.isometry(l).numpy()[0]
+            assert np.allclose(V @ V.conj().T, np.eye(CHI**2), atol=1e-4), l
+
+
+def test_gradients_nonzero_in_extra_environment_block():
+    x = pure_registers(B, CHI, 2**NL, 3)
+    new = cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=4, init_noise=0.0, seed=6)
+    with tf.GradientTape() as tape:
+        loss = tf.reduce_sum(new(x) * tf.random.stateless_normal([B, CHI**2], seed=[1, 2]))
+    g = tape.gradient(loss, new.p0[0])
+    assert g is not None and np.isfinite(g.numpy()).all() and np.abs(g.numpy()).max() > 0
+
+
+def test_finite_difference():
+    x = pure_registers(3, CHI, 2**NL, 4)
+    new = cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=4, init="random", init_noise=0.3, seed=7)
+    tgt = tf.random.stateless_normal([3, CHI**2], seed=[3, 4])
+
+    def f():
+        return tf.reduce_sum(new(x) * tgt)
+
+    with tf.GradientTape() as tape:
+        loss = f()
+    g = tape.gradient(loss, new.p0[0]).numpy()
+    idx = (5, 0)
+    eps = 1e-2
+    w = new.p0[0]
+    base = w.numpy().copy()
+    plus = base.copy(); plus[idx] += eps
+    minus = base.copy(); minus[idx] -= eps
+    w.assign(plus); fp = f().numpy()
+    w.assign(minus); fm = f().numpy()
+    w.assign(base)
+    fd = (fp - fm) / (2 * eps)
+    assert abs(fd - g[idx]) < 5e-3 * max(1.0, abs(fd)), (fd, g[idx])
+
+
+def test_wide_root_embedded_reproduces_unitary_readout():
+    x = pure_registers(B, CHI, 2**NL, 5)
+    ref = ff.FeedforwardTNLayer(chi=CHI, nlayers=NL, mode="baseline", share_per_layer=True, seed=8)
+    new = cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=4, root_rank=6, init_noise=0.0, seed=8)
+    assert new.n_outcomes == CHI * 6
+    out = new(x).numpy()
+    assert out.shape == (B, CHI * 6)
+    assert np.allclose(out.sum(-1), 1.0, atol=1e-4)
+    grid = out.reshape(B, CHI, 6)  # keep-major: index k * Rroot + e
+    assert np.allclose(grid[:, :, CHI:], 0.0, atol=1e-5)
+    assert np.abs(grid[:, :, :CHI].reshape(B, -1) - ref(x).numpy()).max() < 1e-5
+
+
+def test_wide_root_trace_preserving_with_feedforward():
+    x = pure_registers(B, CHI, 2**NL, 6)
+    new = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, root_rank=8, init="random", seed=9)
+    for w in new.pff:
+        if w is not None:
+            w.assign(np.random.default_rng(1).normal(0, 0.3, size=w.shape).astype(np.float32))
+    out = new(x).numpy()
+    assert out.shape == (B, CHI * 8) and np.allclose(out.sum(-1), 1.0, atol=1e-4)
+    V = new.isometry(NL - 1).numpy()[0]
+    assert np.allclose(V @ V.conj().T, np.eye(CHI**2), atol=1e-4)
+
+
+def test_haar_random_init_differs_from_embedding_and_is_isometric():
+    x = pure_registers(B, CHI, 2**NL, 7)
+    emb = cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=6, init_noise=0.0, seed=10)
+    rnd = cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=6, init="random", seed=10)
+    assert np.abs(emb(x).numpy() - rnd(x).numpy()).max() > 1e-3
+    for l in range(NL):
+        V = rnd.isometry(l).numpy()[0]
+        assert np.allclose(V @ V.conj().T, np.eye(CHI**2), atol=1e-4)
+    # the root keeps the baseline unitary in both
+    assert np.abs(emb.isometry(NL - 1).numpy() - rnd.isometry(NL - 1).numpy()).max() < 1e-6
+
+
+def test_root_fold_keeps_unitary_readout_width():
+    x = pure_registers(B, CHI, 2**NL, 8)
+    ref = ff.FeedforwardTNLayer(chi=CHI, nlayers=NL, mode="baseline", share_per_layer=True, seed=11)
+    emb = cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=4, root_rank=8, root_fold=True, init_noise=0.0, seed=11)
+    assert emb.n_outcomes == CHI**2
+    assert np.abs(emb(x).numpy() - ref(x).numpy()).max() < 1e-5
+    rnd = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, root_rank=8, root_fold=True, init="random", seed=12)
+    out = rnd(x).numpy()
+    assert out.shape == (B, CHI**2) and np.allclose(out.sum(-1), 1.0, atol=1e-4)
+    # folding is a sum over outcomes of the unfolded model with the same parameters
+    wide = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, root_rank=8, init="random", seed=12)
+    for a, b in zip(wide.weights, rnd.weights):
+        a.assign(b)
+    full = wide(x).numpy().reshape(B, CHI, 8)  # (k, e), e = a * chi + b
+    folded = full.reshape(B, CHI, 8 // CHI, CHI).sum(2)  # (k, b)
+    assert np.abs(folded.reshape(B, -1) - out).max() < 1e-5
+
+
+def test_ff_dim_default_unchanged_and_extension_runs():
+    x = pure_registers(B, CHI, 2**NL, 9)
+    a = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, seed=13)
+    b = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, ff_dim=8, seed=13)
+    assert np.abs(a(x).numpy() - b(x).numpy()).max() < 1e-6
+    # unitary control with extended features: more ff parameters, no environment, trace preserving
+    u = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=CHI, ff_dim=20, root_ff_dim=30, seed=13)
+    assert u.pff[1].shape[-1] == 20 and u.pff[NL - 1].shape[-1] == 30
+    for l, w in enumerate(u.pff):
+        if w is not None:
+            w.assign(np.random.default_rng(l).normal(0, 0.3, size=w.shape).astype(np.float32))
+    out = u(x).numpy()
+    assert np.allclose(out.sum(-1), 1.0, atol=1e-4)
+    with tf.GradientTape() as tape:
+        loss = tf.reduce_sum(u(x) * tf.random.stateless_normal([B, CHI**2], seed=[5, 6]))
+    g = tape.gradient(loss, u.pff[NL - 1])
+    assert g is not None and np.abs(g.numpy()[..., 8:]).max() > 0  # extra (monomial) features receive gradient
+    f = tf.constant(np.random.default_rng(3).uniform(size=(2, 3, 4)), dtype=tf.float32)
+    for n_total in (14, 30):  # degree 2 only, then into degree 3
+        ref = np.stack([np.prod(f.numpy()[..., list(c)], axis=-1) for c in cp.monomial_indices(4, n_total)], axis=-1)
+        assert np.abs(cp.monomial_features(f, n_total).numpy() - ref).max() < 1e-6
+    # baseline monomials: base (4) + degree 2 (10) = 14 features
+    assert len(cp.monomial_indices(4, 14)) == 10
+
+
+def _set_pff(layer, scale=0.3, seed=0):
+    for l, w in enumerate(layer.pff):
+        if w is not None:
+            w.assign(np.random.default_rng(seed + l).normal(0, scale, size=w.shape).astype(np.float32))
+
+
+def test_meas_bases_default_unchanged_and_k1_identical():
+    x = pure_registers(B, CHI, 2**NL, 10)
+    ref = ff.FeedforwardTNLayer(chi=CHI, nlayers=NL, mode="B", share_per_layer=True, seed=14)
+    a = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=CHI, seed=14)
+    k1 = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=CHI, meas_bases=1, seed=14)
+    w = np.random.default_rng(1).normal(0, 0.3, size=ref.params_ff.shape).astype(np.float32)
+    ref.params_ff.assign(w)
+    off = 0
+    for l in range(1, NL):
+        a.pff[l].assign(w[:, off : off + 1])
+        k1.pff[l].assign(w[:, off : off + 1])
+        off += 1
+    assert [v.name for v in a.weights] == [v.name for v in k1.weights]
+    assert not any("mb" in v.name for v in a.weights)
+    assert a.get_config()["meas_bases"] is None
+    assert np.abs(a(x).numpy() - ref(x).numpy()).max() < 1e-5  # default reproduces the unitary layer
+    assert np.array_equal(a(x).numpy(), k1(x).numpy())  # K = 1 is bit-identical to the default
+    # also at R > chi
+    r1 = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, init="random", seed=15)
+    r2 = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, init="random", meas_bases=1, seed=15)
+    _set_pff(r1)
+    _set_pff(r2)
+    assert np.array_equal(r1(x).numpy(), r2(x).numpy())
+
+
+def test_meas_bases_feature_count_and_trace_preserving():
+    x = pure_registers(B, CHI, 2**NL, 11)
+    for share in (True, False):
+        for K in (2, 3):
+            m = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=CHI, meas_bases=K, share_per_layer=share, seed=16)
+            for l in range(1, NL):  # each child passes K * chi features, two children per vertex
+                assert m.pff[l].shape[-1] == 2 * K * CHI and m.ff_dims[l] == 2 * K * CHI
+            assert m.pmb[NL - 1] is None and all(m.pmb[l] is not None for l in range(NL - 1))
+            _set_pff(m)
+            out = m(x).numpy()
+            assert out.shape == (B, CHI**2) and np.allclose(out.sum(-1), 1.0, atol=1e-4)
+            # each basis probability vector of a child sums to one; basis 0 matches the computational basis
+            nv = m.n_vertices[0]
+            sig = np.random.default_rng(2).normal(size=(B, nv, CHI, CHI)) + 1j * np.random.default_rng(3).normal(size=(B, nv, CHI, CHI))
+            sig = sig @ sig.conj().swapaxes(-1, -2)
+            sig /= np.trace(sig, axis1=-2, axis2=-1)[..., None, None].real
+            p = m.meas_probs(0, tf.constant(sig, dtype=tf.complex64)).numpy().reshape(B, nv, K, CHI)
+            assert np.allclose(p.sum(-1), 1.0, atol=1e-4)
+            assert np.allclose(p[:, :, 0], np.real(np.diagonal(sig, axis1=-2, axis2=-1)), atol=1e-5)
+            assert (p >= -1e-6).all()
+            for l in range(NL):
+                V = m.isometry(l).numpy()[0]
+                assert np.allclose(V @ V.conj().T, np.eye(CHI**2), atol=1e-4)
+
+
+def test_meas_bases_extra_basis_unitaries_get_gradients_and_change_output():
+    x = pure_registers(B, CHI, 2**NL, 12)
+    m = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=CHI, meas_bases=3, seed=17)
+    _set_pff(m)
+    with tf.GradientTape() as tape:
+        loss = tf.reduce_sum(m(x) * tf.random.stateless_normal([B, CHI**2], seed=[7, 8]))
+    grads = tape.gradient(loss, m.pmb[: NL - 1])
+    for l, g in enumerate(grads):
+        assert g is not None and np.isfinite(g.numpy()).all() and np.abs(g.numpy()).max() > 1e-6, l
+    # the extra bases enter the prediction: changing one changes the output
+    k1 = cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=CHI, seed=17)
+    assert len(k1.weights) < len(m.weights)
+    before = m(x).numpy()
+    m.pmb[0].assign(m.pmb[0].numpy() + 0.3)
+    assert np.abs(m(x).numpy() - before).max() > 1e-4
+    # a basis unitary stays unitary after a parameter step
+    U = m.meas_unitaries(0).numpy()
+    assert np.allclose(U @ np.conj(np.swapaxes(U, -1, -2)), np.eye(CHI), atol=1e-4)
+
+
+def test_meas_bases_rejects_incompatible_options():
+    for kw in (dict(mode="baseline"), dict(ff_dim=40), dict(ff_width=4)):
+        kw.setdefault("mode", "B")
+        try:
+            cp.CPTPTNLayer(chi=CHI, nlayers=NL, kraus_rank=CHI, meas_bases=2, **kw)
+        except ValueError:
+            continue
+        raise AssertionError(kw)
+
+
+def _two_layer_manual(layer, x, cut):
+    """Reference forward of a 2-layer mode-B layer (child layer 0, root layer 1) written out by hand.
+
+    ``cut=True`` wraps the child's feedforward features in ``tf.stop_gradient`` before they enter the root isometry.
+    ``layer`` must have ``ff_stop_grad = False`` so that the cut is only the one applied here.
+    """
+    chi, d, R = layer.chi, layer.d, layer.R
+    msgs = tf.transpose(x, [0, 3, 1, 2])
+    outs = None
+    ff_input = None
+    for l in range(2):
+        n = layer.n_vertices[l]
+        Rl = R if l == 0 else layer.Rroot
+        rho = tf.einsum("nvim,nvjo->nvijmo", msgs[:, 0::2], msgs[:, 1::2])
+        rho = tf.reshape(rho, [-1, n, d, d])
+        V = layer.isometry(l, ff_input)
+        sigma = tf.matmul(tf.matmul(V, rho, transpose_a=True), tf.math.conj(V))
+        diag = tf.math.real(tf.linalg.diag_part(sigma))
+        if l == 0:
+            s6 = tf.reshape(sigma, [-1, n, Rl, chi, Rl, chi])
+            msgs = tf.einsum("nvcdCe,cC->nvde", s6, tf.eye(Rl, dtype=sigma.dtype))
+            p = tf.reduce_sum(tf.reshape(diag, [-1, n, Rl, chi]), axis=-1)
+            ff_input = tf.concat([p[:, 0::2], p[:, 1::2]], axis=-1)
+            if cut:
+                ff_input = tf.stop_gradient(ff_input)
+        else:
+            outs = tf.reshape(tf.transpose(tf.reshape(diag, [-1, Rl, chi]), [0, 2, 1]), [-1, layer.n_outcomes])
+    return outs
+
+
+def test_ff_stop_grad_blocks_gradient_through_features_only():
+    x = pure_registers(B, CHI, 4, 20)
+    kw = dict(chi=CHI, nlayers=2, mode="B", kraus_rank=4, init="random", seed=21)
+    plain = cp.CPTPTNLayer(**kw)
+    sg = cp.CPTPTNLayer(**kw, ff_stop_grad=True)
+    _set_pff(plain, 0.5)
+    _set_pff(sg, 0.5)
+    assert sg.get_config()["ff_stop_grad"] is True and plain.get_config()["ff_stop_grad"] is False
+    assert sg.count_params() == plain.count_params()
+    # forward output identical
+    assert np.array_equal(plain(x).numpy(), sg(x).numpy())
+    w = tf.constant(np.random.default_rng(5).normal(size=(B, plain.n_outcomes)).astype(np.float32))
+
+    def grads(fn, layer):
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(w * fn())
+        return tape.gradient(loss, [layer.p0[0], layer.p0[1], layer.pff[1]])
+
+    g_plain = grads(lambda: plain(x), plain)
+    g_sg = grads(lambda: sg(x), sg)
+    # the by-hand forward reproduces the layer, so the by-hand cut is a trustworthy reference
+    assert np.abs(_two_layer_manual(plain, x, cut=False).numpy() - plain(x).numpy()).max() < 1e-5
+    g_cut = grads(lambda: _two_layer_manual(plain, x, cut=True), plain)
+    # child parameters: stop-gradient equals "features cut by hand"; it differs from the full gradient
+    child_cut = np.abs(g_sg[0].numpy() - g_cut[0].numpy()).max()
+    child_ff_part = np.abs(g_plain[0].numpy() - g_sg[0].numpy()).max()
+    assert child_cut < 1e-6, child_cut
+    assert child_ff_part > 1e-4, child_ff_part  # the feedforward path carried a nonzero gradient in the plain model
+    # parent parameters (feedforward weights and base unitary) are unaffected by the stop-gradient
+    for i in (1, 2):
+        assert np.abs(g_sg[i].numpy() - g_plain[i].numpy()).max() < 1e-6
+        assert np.abs(g_sg[i].numpy()).max() > 1e-4
+    # with the parent's feedforward weights at zero the feature gradient vanishes: both models agree
+    for lay in (plain, sg):
+        lay.pff[1].assign(np.zeros(lay.pff[1].shape, dtype=np.float32))
+    z_plain = grads(lambda: plain(x), plain)
+    z_sg = grads(lambda: sg(x), sg)
+    assert np.abs(z_plain[0].numpy() - z_sg[0].numpy()).max() < 1e-6
+
+
+def test_ff_null_shuffle():
+    kw = dict(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, init="random", seed=31)
+    plain = cp.CPTPTNLayer(**kw)
+    shuf = cp.CPTPTNLayer(**kw, ff_null="shuffle")
+    _set_pff(plain, 0.5)
+    _set_pff(shuf, 0.5)
+    assert shuf.count_params() == plain.count_params() and shuf.get_config()["ff_null"] == "shuffle"
+    x = pure_registers(8, CHI, 2**NL, 30)
+    y_plain, y_shuf = plain(x).numpy(), shuf(x).numpy()
+    assert np.abs(y_plain - y_shuf).max() > 1e-3  # per-sample features differ, so the output changes
+    assert np.allclose(y_shuf.sum(axis=-1), 1.0, atol=1e-4)  # still a probability distribution
+    # identical samples: a permutation changes nothing
+    x_same = tf.repeat(x[:1], 8, axis=0)
+    assert np.abs(plain(x_same).numpy() - shuf(x_same).numpy()).max() < 1e-5
+    # zero feedforward weights: the features do not enter, so the shuffle changes nothing
+    for lay in (plain, shuf):
+        for w in lay.pff:
+            if w is not None:
+                w.assign(np.zeros(w.shape, dtype=np.float32))
+    assert np.abs(plain(x).numpy() - shuf(x).numpy()).max() < 1e-5
+    # default config unchanged and invalid values rejected
+    assert plain.get_config()["ff_null"] is None
+    try:
+        cp.CPTPTNLayer(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, ff_null="constant")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("constant should be rejected")
+
+
+def test_ff_regularizers_training_only_and_default_off():
+    kw = dict(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, init="random", seed=41)
+    plain = cp.CPTPTNLayer(**kw)
+    x = pure_registers(16, CHI, 2**NL, 40)
+    _set_pff(plain, 0.5)
+    y0 = plain(x).numpy()
+    assert plain.ff_noise == 0 and plain.ff_dropout == 0 and plain.ff_mix == 0
+    for opt in (dict(ff_noise=0.1), dict(ff_dropout=0.25), dict(ff_mix=0.5)):
+        lay = cp.CPTPTNLayer(**kw, **opt)
+        _set_pff(lay, 0.5)
+        assert lay.count_params() == plain.count_params()
+        for k, v in opt.items():
+            assert lay.get_config()[k] == v
+        # clean at evaluation: identical to the plain layer, with training None or False
+        assert np.array_equal(lay(x).numpy(), y0)
+        assert np.array_equal(lay(x, training=False).numpy(), y0)
+        # active at training: the output changes, differs between draws, and is still a distribution
+        a, b = lay(x, training=True).numpy(), lay(x, training=True).numpy()
+        assert np.abs(a - y0).max() > 1e-4 and np.abs(a - b).max() > 1e-6, opt
+        assert np.allclose(a.sum(axis=-1), 1.0, atol=1e-4)
+    # zero feedforward weights: the features do not enter, so the regularizers change nothing
+    lay = cp.CPTPTNLayer(**kw, ff_noise=0.1, ff_dropout=0.25, ff_mix=0.5)
+    for w in lay.pff:
+        if w is not None:
+            w.assign(np.zeros(w.shape, dtype=np.float32))
+    assert np.abs(lay(x, training=True).numpy() - lay(x).numpy()).max() < 1e-5
+    # the feature transform itself: noise std, dropout rate and mean preservation, mixing with a full-rate permutation
+    f = tf.fill([4000, 8, 32], 0.2)
+    lay = cp.CPTPTNLayer(**kw, ff_noise=0.03)
+    d = (lay._regularize_ff(f) - f).numpy()
+    assert abs(d.std() - 0.03) < 2e-3 and abs(d.mean()) < 1e-3
+    lay = cp.CPTPTNLayer(**kw, ff_dropout=0.25)
+    g = lay._regularize_ff(f).numpy()
+    assert abs((g == 0).mean() - 0.25) < 0.01 and abs(g.mean() - 0.2) < 2e-3
+    lay = cp.CPTPTNLayer(**kw, ff_mix=0.1)
+    ramp = tf.reshape(tf.range(4000, dtype=tf.float32), [4000, 1, 1]) * tf.ones([4000, 8, 32])
+    h = lay._regularize_ff(ramp).numpy()
+    assert abs((h != ramp.numpy()).mean() - 0.1) < 0.02
+    # invalid values rejected
+    for bad in (dict(ff_noise=-1.0), dict(ff_dropout=1.0), dict(ff_mix=1.5)):
+        try:
+            cp.CPTPTNLayer(**kw, **bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+
+
+def test_ff_regularizers_config_names():
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    import run_ff_experiment as rfe
+
+    for name, key, val in (("LK16Bn01", "ff_noise", 0.01), ("LK16Bn03", "ff_noise", 0.03), ("LK16Bdo10", "ff_dropout", 0.1),
+                           ("LK16Bdo25", "ff_dropout", 0.25), ("LK16Bmx10", "ff_mix", 0.1)):
+        c = rfe.make_cfg(**dict(rfe.CONFIGS[name], task="cifar10", seed=0, epochs=1))
+        assert c[key] == val and c["kraus_rank"] == 16
+    assert rfe.make_cfg(**dict(rfe.CONFIGS["LK16B"], task="cifar10", seed=0, epochs=1))["ff_noise"] is None
+
+
+def test_w44_noise_flip_config():
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    import run_ff_experiment as rfe
+
+    c = rfe.make_cfg(**dict(rfe.CONFIGS["LK16Bn03af"], task="cifar10", seed=0, epochs=1))
+    assert c["ff_noise"] == 0.03 and c["augment"] == "flip" and c["kraus_rank"] == 16 and c["ff_dropout"] is None
+    af = rfe.make_cfg(**dict(rfe.CONFIGS["LK16Baf"], task="cifar10", seed=0, epochs=1))
+    assert af["ff_noise"] is None and af["augment"] == "flip"
+    # same architecture as LK16Baf: only ff_noise differs
+    d = {k for k in c if c[k] != af.get(k)}
+    assert d <= {"ff_noise", "name"}, d
+    # the layer built from it is clean at evaluation, noisy at training
+    kw = dict(chi=CHI, nlayers=NL, mode="B", kraus_rank=4, init="random", seed=41)
+    lay = cp.CPTPTNLayer(**kw, ff_noise=0.03)
+    plain = cp.CPTPTNLayer(**kw)
+    x = pure_registers(16, CHI, 2**NL, 40)
+    _set_pff(lay, 0.5)
+    _set_pff(plain, 0.5)
+    assert np.array_equal(lay(x, training=False).numpy(), plain(x).numpy())
+    assert np.abs(lay(x, training=True).numpy() - plain(x).numpy()).max() > 1e-5
+
+
+def test_w55_noise01_flip_config():
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    import run_ff_experiment as rfe
+
+    c = rfe.make_cfg(**dict(rfe.CONFIGS["LK16Bn01af"], task="cifar10", seed=0, epochs=1))
+    assert c["ff_noise"] == 0.01 and c["augment"] == "flip" and c["kraus_rank"] == 16 and c["ff_dropout"] is None
+    n03 = rfe.make_cfg(**dict(rfe.CONFIGS["LK16Bn03af"], task="cifar10", seed=0, epochs=1))
+    d = {k for k in c if c[k] != n03.get(k)}
+    assert d <= {"ff_noise", "name"}, d
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("ok", name)
